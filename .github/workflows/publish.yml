@@ -13,7 +13,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm install
+      - run: npm install --ignore-scripts
       - run: npm run compile
       - run: npm test
       - run: npx vsce publish --no-dependencies
