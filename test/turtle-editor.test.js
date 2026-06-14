@@ -155,6 +155,7 @@ describe('TestStore basics', function () {
   let store;
 
   before(function () {
+    if (!fs.existsSync(modelDir)) { this.skip(); }
     store = new TestStore();
     const ttlFiles = fs.readdirSync(modelDir).filter(f => f.endsWith('.ttl'));
     for (const f of ttlFiles) {
