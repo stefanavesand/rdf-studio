@@ -14,10 +14,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm ci
+          cache: npm
+      - run: npm install --ignore-scripts
       - run: npm run compile
       - run: npm test
-      - run: npx vsce package
+      - run: npx vsce package --no-dependencies
       - uses: actions/upload-artifact@v4
         with:
           name: rdf-studio.vsix
