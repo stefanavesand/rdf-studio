@@ -1,0 +1,13 @@
+src/**
+test/**
+tsconfig.json
+.gitignore
+.DS_Store
+**/.DS_Store
+node_modules/@vscode/codicons/src/**
+node_modules/@vscode/codicons/dist/codicon.csv
+node_modules/@vscode/codicons/dist/codicon.html
+node_modules/@vscode/codicons/dist/codicon.svg
+node_modules/@vscode/codicons/**/*.md
+node_modules/@vscode/codicons/**/LICENSE
+node_modules/oxigraph/web*

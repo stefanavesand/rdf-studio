@@ -1,0 +1,255 @@
+{
+  "name": "rdf-studio",
+  "displayName": "RDF Studio",
+  "description": "Browse, edit, and validate RDF knowledge graphs with native tree views, SPARQL, and OWL/SHACL support.",
+  "version": "0.1.0",
+  "publisher": "stefanavesand",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stefanavesand/rdf-studio.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "rdf",
+    "owl",
+    "turtle",
+    "sparql",
+    "knowledge-graph",
+    "ontology",
+    "shacl",
+    "semantic-web"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/*.ttl"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kgExplorer",
+          "title": "Knowledge Graph",
+          "icon": "$(type-hierarchy)"
+        }
+      ]
+    },
+    "views": {
+      "kgExplorer": [
+        {
+          "id": "kgExplorer.ontology",
+          "name": "Ontology"
+        },
+        {
+          "id": "kgExplorer.relationships",
+          "name": "Relationships",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "kgExplorer.newOntology",
+        "title": "New Ontology",
+        "icon": "$(add)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.refresh",
+        "title": "Refresh Knowledge Graph",
+        "icon": "$(refresh)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.showProperties",
+        "title": "Show Properties",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.goToDefinition",
+        "title": "Open Source",
+        "icon": "$(go-to-file)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.search",
+        "title": "Search Knowledge Graph",
+        "icon": "$(search)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.copyIri",
+        "title": "Copy IRI",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.sparql",
+        "title": "Open SPARQL Query Panel",
+        "icon": "$(terminal)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.showGraph",
+        "title": "Show Neighborhood Graph",
+        "icon": "$(type-hierarchy)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.deleteTriple",
+        "title": "Delete Triple",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.addProperty",
+        "title": "Add Property",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.addRelationship",
+        "title": "Add Relationship",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.newInstance",
+        "title": "New Instance",
+        "icon": "$(add)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.newClass",
+        "title": "New Class",
+        "icon": "$(add)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.newProperty",
+        "title": "New Property...",
+        "icon": "$(symbol-field)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.renameEntity",
+        "title": "Rename...",
+        "icon": "$(edit)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.deleteClass",
+        "title": "Delete Class...",
+        "icon": "$(trash)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.deleteEntity",
+        "title": "Delete Entity...",
+        "icon": "$(trash)",
+        "category": "KG Explorer"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "kgExplorer.newOntology",
+          "when": "view == kgExplorer.ontology",
+          "group": "navigation"
+        },
+        {
+          "command": "kgExplorer.refresh",
+          "when": "view == kgExplorer.ontology",
+          "group": "navigation"
+        },
+        {
+          "command": "kgExplorer.search",
+          "when": "view == kgExplorer.ontology",
+          "group": "navigation"
+        },
+        {
+          "command": "kgExplorer.sparql",
+          "when": "view == kgExplorer.ontology",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "kgExplorer.goToDefinition",
+          "when": "viewItem == class || viewItem == instance || viewItem == iriValue || viewItem == namespace",
+          "group": "navigation"
+        },
+        {
+          "command": "kgExplorer.showGraph",
+          "when": "viewItem == class || viewItem == instance || viewItem == iriValue",
+          "group": "navigation"
+        },
+        {
+          "command": "kgExplorer.newInstance",
+          "when": "viewItem == class",
+          "group": "1_create"
+        },
+        {
+          "command": "kgExplorer.newProperty",
+          "when": "viewItem == class",
+          "group": "1_create"
+        },
+        {
+          "command": "kgExplorer.renameEntity",
+          "when": "viewItem == class || viewItem == instance",
+          "group": "5_modify"
+        },
+        {
+          "command": "kgExplorer.deleteClass",
+          "when": "viewItem == class",
+          "group": "7_danger"
+        },
+        {
+          "command": "kgExplorer.deleteEntity",
+          "when": "viewItem == instance",
+          "group": "7_danger"
+        },
+        {
+          "command": "kgExplorer.copyIri",
+          "when": "viewItem == class || viewItem == instance || viewItem == iriValue",
+          "group": "9_cutcopypaste"
+        }
+      ]
+    },
+    "languages": [
+      {
+        "id": "turtle",
+        "aliases": [
+          "Turtle",
+          "RDF Turtle"
+        ],
+        "extensions": [
+          ".ttl",
+          ".turtle"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies",
+    "lint": "eslint src --ext ts",
+    "test": "mocha test/**/*.test.js --timeout 10000"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "mocha": "^11.7.6",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@vscode/codicons": "^0.0.45",
+    "oxigraph": "0.4.0-alpha.7"
+  }
+}
