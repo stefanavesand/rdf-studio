@@ -13,9 +13,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm cache clean --force
-      - run: npm install --no-audit --ignore-scripts
-        timeout-minutes: 10
+      - run: yarn install --frozen-lockfile --ignore-scripts || yarn install --ignore-scripts
       - run: npm run compile
       - run: npm test
       - run: npx vsce publish --no-dependencies
