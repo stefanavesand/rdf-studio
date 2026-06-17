@@ -53,8 +53,9 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
         vscode.commands.executeCommand('kgExplorer.deleteTriple', msg.subject, msg.predicate, msg.object, msg.label);
       } else if (msg.type === 'addProperty') {
         vscode.commands.executeCommand('kgExplorer.addProperty', msg.subject, msg.predicate, msg.range, msg.isObject);
+      } else if (msg.type === 'editRelationship') {
+        vscode.commands.executeCommand('kgExplorer.editRelationship', msg.subject, msg.predicate, msg.oldValue, msg.oldLabel, msg.dir);
       } else if (msg.type === 'addRelationship') {
-        // get predicates for this entity's type and show form
         vscode.commands.executeCommand('kgExplorer.prepareAddRelationship', msg.subject);
       } else if (msg.type === 'editValue') {
         vscode.commands.executeCommand('kgExplorer.editValue', msg.subject, msg.predicate, msg.oldValue, msg.newValue);
@@ -427,9 +428,9 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     if (dir === 'out') {
       h += `<div class="c-src cell">${this.thisBox(focusType, focusHue)}</div>`;
       h += `<div class="c-rel cell">${this.relCell(g.relationLabel, dir)}</div>`;
-      h += `<div class="c-tgt cell stack">${g.items.map(i => this.entityBox(i.label, i.type, i.iri, g.relation)).join('')}</div>`;
+      h += `<div class="c-tgt cell stack">${g.items.map(i => this.entityBox(i.label, i.type, i.iri, g.relation, 'out')).join('')}</div>`;
     } else {
-      h += `<div class="c-src cell stack">${g.items.map(i => this.entityBox(i.label, i.type, i.iri, g.relation)).join('')}</div>`;
+      h += `<div class="c-src cell stack">${g.items.map(i => this.entityBox(i.label, i.type, i.iri, g.relation, 'in')).join('')}</div>`;
       h += `<div class="c-rel cell">${this.relCell(g.relationLabel, dir)}</div>`;
       h += `<div class="c-tgt cell">${this.thisBox(focusType, focusHue)}</div>`;
     }
@@ -546,13 +547,16 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     return `<div class="node-box full pivot" style="--h:${hue}"><div class="node-label"><span class="node-dot" style="--h:${hue}"></span><span class="node-type" style="--h:${hue}">${esc(type)}</span></div><span class="node-name" style="--h:${hue}; font-weight:600;">this</span></div>`;
   }
 
-  private entityBox(label: string, type: string, iri: string, predIri?: string): string {
+  private entityBox(label: string, type: string, iri: string, predIri?: string, dir: 'out' | 'in' = 'out'): string {
     const h = hueFor(type);
     const truncated = label.length > 30 ? label.slice(0, 28) + '…' : label;
     const delAttr = predIri && this.selectedIri
       ? ` data-del-subj="${esc(this.selectedIri)}" data-del-pred="${esc(predIri)}" data-del-obj="${esc(iri)}" data-del-label="${esc(label)}"`
       : '';
-    return `<a class="node-box full clickable" data-iri="${esc(iri)}" title="${esc(label)}  ·  ${esc(type)}" style="--h:${h}"><div class="node-label"><span class="node-dot" style="--h:${h}"></span><span class="node-type" style="--h:${h}">${esc(type)}</span><span class="node-x del-btn"${delAttr} style="--h:${h}" title="Remove"><span class="codicon codicon-close"></span></span></div><span class="node-name" style="--h:${h}">${esc(truncated)}</span></a>`;
+    const editAttr = predIri && this.selectedIri
+      ? ` data-edit-subj="${esc(this.selectedIri)}" data-edit-pred="${esc(predIri)}" data-edit-obj="${esc(iri)}" data-edit-label="${esc(label)}" data-edit-dir="${dir}"`
+      : '';
+    return `<a class="node-box full clickable" data-iri="${esc(iri)}" title="${esc(label)}  ·  ${esc(type)}" style="--h:${h}"><div class="node-label"><span class="node-dot" style="--h:${h}"></span><span class="node-type" style="--h:${h}">${esc(type)}</span><span class="node-actions"><span class="node-edit edit-rel-btn"${editAttr} style="--h:${h}" title="Edit"><span class="codicon codicon-edit"></span></span><span class="node-x del-btn"${delAttr} style="--h:${h}" title="Remove"><span class="codicon codicon-close"></span></span></span></div><span class="node-name" style="--h:${h}">${esc(truncated)}</span></a>`;
   }
 
   private entityChipInline(label: string, type: string, iri: string): string {
@@ -825,14 +829,16 @@ body { font-family:var(--vscode-font-family); font-size:13px; color:var(--fg); b
 .node-dot { width:6px; height:6px; border-radius:50%; flex:0 0 auto; background:hsl(var(--h,212) 58% 42%); }
 .node-type { font-size:9px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:hsl(var(--h,212) 55% 33%); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1; }
 .node-name { font-size:13px; font-weight:500; color:hsl(var(--h,212) 55% 33%); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; line-height:1.25; }
-.node-x { margin-left:auto; opacity:.55; line-height:1; cursor:pointer; flex:0 0 auto; color:hsl(var(--h,212) 55% 33%); font-size:11px; margin:-2px -1px -2px 0; }
-.node-x:hover { opacity:1; }
-.node-x .codicon { font-size:11px; }
+.node-actions { margin-left:auto; display:flex; gap:3px; opacity:0; transition:opacity .15s; }
+.node-box:hover .node-actions { opacity:1; }
+.node-x, .node-edit { line-height:1; cursor:pointer; flex:0 0 auto; color:hsl(var(--h,212) 55% 33%); font-size:11px; }
+.node-x:hover, .node-edit:hover { opacity:.7; }
+.node-x .codicon, .node-edit .codicon { font-size:11px; }
 a.node-box { text-decoration:none; cursor:pointer; }
 a.node-box:hover { filter:brightness(.98); }
 .vscode-dark .node-box { background:hsl(var(--h,212) 34% 15%); border-color:hsl(var(--h,212) 34% 36%); }
 .vscode-dark .node-dot { background:hsl(var(--h,212) 58% 62%); }
-.vscode-dark .node-type, .vscode-dark .node-name, .vscode-dark .node-x { color:hsl(var(--h,212) 52% 72%); }
+.vscode-dark .node-type, .vscode-dark .node-name, .vscode-dark .node-x, .vscode-dark .node-edit { color:hsl(var(--h,212) 52% 72%); }
 
 /* class box (schema view — dashed) */
 .class-box { display:flex; flex-direction:column; gap:1px; padding:6px 7px; min-height:38px; justify-content:center; border-radius:4px; background:transparent; border:1.5px dashed hsl(var(--h,212) 58% 42%); width:100%; }
@@ -1001,6 +1007,13 @@ function startEdit(box) {
 }
 
 document.addEventListener('click', e => {
+  // edit object relationship
+  const editRel = e.target.closest('.edit-rel-btn[data-edit-subj]');
+  if (editRel) {
+    e.preventDefault(); e.stopPropagation();
+    vscode.postMessage({ type:'editRelationship', subject:editRel.dataset.editSubj, predicate:editRel.dataset.editPred, oldValue:editRel.dataset.editObj, oldLabel:editRel.dataset.editLabel||'', dir:editRel.dataset.editDir||'out' });
+    return;
+  }
   // delete
   const del = e.target.closest('.del-btn[data-del-subj]');
   if (del) {

@@ -846,6 +846,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       relationshipsProvider.showForm({ type: 'addRelationship', subject, predicates, rangeEntities });
     }),
 
+    vscode.commands.registerCommand('kgExplorer.editRelationship', async (subject: string, predicate: string, oldValue: string, oldLabel: string, dir: string = 'out') => {
+      // For outgoing relationships, show entities matching rdfs:range
+      // For incoming relationships, show entities matching rdfs:domain
+      const lookupProp = dir === 'in' ? 'rdfs:domain' : 'rdfs:range';
+      const typeRows = store.query(`SELECT ?type WHERE { <${predicate}> ${lookupProp} ?type } LIMIT 1`);
+      const targetType = typeRows[0]?.get('type')?.value;
+
+      const entityRows = targetType
+        ? store.query(`SELECT ?inst ?label WHERE { ?inst a <${targetType}> . OPTIONAL { ?inst rdfs:label ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 200`)
+        : store.query(`SELECT ?inst ?label WHERE { ?inst rdfs:label ?label . FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 200`);
+
+      const items = entityRows.map(r => ({
+        label: r.get('label')?.value ?? store.localName(r.get('inst')!.value),
+        iri: r.get('inst')!.value,
+      }));
+
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: `Replace "${oldLabel}" with...`,
+      });
+      if (!picked || picked.iri === oldValue) { return; }
+
+      const delOk = await editor.deleteTriple(subject, predicate, oldValue, oldLabel);
+      if (delOk) {
+        const addOk = await editor.addTriple(subject, predicate, picked.iri, false);
+        if (addOk) {
+          await loadAllTtl();
+          relationshipsProvider.select(subject, false);
+        }
+      }
+    }),
+
     vscode.commands.registerCommand('kgExplorer.commitAddRel', async (subject: string, predicate: string, value: string, isObject: boolean) => {
       const ok = await editor.addTriple(subject, predicate, value, !isObject);
       if (ok) {
