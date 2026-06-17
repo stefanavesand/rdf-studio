@@ -323,12 +323,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         classLabel = classIri ? store.localName(classIri) : undefined;
       }
 
-      // get all classes for the range picker, prefixed to disambiguate
+      // find the ontology namespace for this class and its imports
+      const localNs = classIri ? classIri.replace(/[^#/]*$/, '') : '';
+      const importRows = localNs ? store.query(`
+        SELECT ?imported WHERE {
+          ?ont a owl:Ontology .
+          FILTER(STRSTARTS(STR(?ont), "${localNs.replace(/#$/, '')}"))
+          ?ont owl:imports ?imported .
+        }
+      `) : [];
+      const allowedNs = new Set<string>();
+      if (localNs) { allowedNs.add(localNs); }
+      for (const r of importRows) {
+        let imp = r.get('imported')!.value;
+        if (!imp.endsWith('#') && !imp.endsWith('/')) { imp += '#'; }
+        allowedNs.add(imp);
+      }
+      // also add standard vocabularies that are always useful
+      allowedNs.add('http://www.w3.org/2002/07/owl#');
+      allowedNs.add('http://www.w3.org/2000/01/rdf-schema#');
+
       const classRows = store.query(`
         SELECT DISTINCT ?cls ?label WHERE {
           ?cls a owl:Class .
           OPTIONAL { ?cls rdfs:label ?label }
-        } ORDER BY ?label LIMIT 200
+        } ORDER BY ?label LIMIT 500
       `);
       const seen = new Set<string>();
       const classes = classRows
@@ -336,7 +355,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const iri = r.get('cls')!.value;
           if (seen.has(iri) || store.localName(iri).startsWith('http')) { return false; }
           seen.add(iri);
-          return true;
+          if (allowedNs.size === 0) { return true; }
+          const ns = iri.replace(/[^#/]*$/, '');
+          return allowedNs.has(ns);
         })
         .map(r => {
           const iri = r.get('cls')!.value;
@@ -708,7 +729,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const instanceIri = instanceNs + localName;
-      const subjCompact = store.compact(instanceIri) || `:${localName}`;
+      const compacted = store.compact(instanceIri);
+      const subjCompact = compacted.includes(':') ? compacted : `:${localName}`;
       const typeCompact = store.compact(classIri);
 
       const newBlock = `\n${subjCompact} a ${typeCompact} ;\n    rdfs:label "${label}" .\n`;
@@ -716,7 +738,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const lastLine = doc.lineCount - 1;
       wsEdit.insert(targetFile, new vscode.Position(lastLine, doc.lineAt(lastLine).text.length), newBlock);
       const ok = await vscode.workspace.applyEdit(wsEdit);
-      if (ok) { await doc.save(); await loadAllTtl(); relationshipsProvider.select(instanceIri, false); revealInOntology(instanceIri); }
+      if (ok) {
+        await doc.save();
+        await loadAllTtl();
+        relationshipsProvider.select(instanceIri, false);
+        setTimeout(() => revealInOntology(instanceIri), 200);
+      }
     }),
 
     vscode.commands.registerCommand('kgExplorer.newClass', async (arg: unknown) => {
@@ -795,17 +822,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             } ORDER BY ?pLabel LIMIT 50
           `);
 
+      const rangeEntitiesCache = new Map<string, {iri: string, label: string}[]>();
       const predicates = predRows.map(r => {
         const iri = r.get('p')!.value;
         const label = r.get('pLabel')?.value ?? store.localName(iri);
-        // look up range
         const rangeRows = store.query(`SELECT ?range WHERE { <${iri}> rdfs:range ?range } LIMIT 1`);
         const range = rangeRows[0]?.get('range')?.value;
         const rangeName = range ? store.localName(range) : '';
-        return { iri, label, range: rangeName };
+        const rangeIri = range ?? '';
+        if (range && !rangeEntitiesCache.has(range)) {
+          const entRows = store.query(`SELECT ?inst ?label WHERE { ?inst a <${range}> . OPTIONAL { ?inst rdfs:label ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 200`);
+          rangeEntitiesCache.set(range, entRows.map(e => ({
+            iri: e.get('inst')!.value,
+            label: e.get('label')?.value ?? store.localName(e.get('inst')!.value),
+          })));
+        }
+        return { iri, label, range: rangeName, rangeIri };
       });
 
-      relationshipsProvider.showForm({ type: 'addRelationship', subject, predicates });
+      const rangeEntities: Record<string, {iri: string, label: string}[]> = {};
+      for (const [k, v] of rangeEntitiesCache) { rangeEntities[k] = v; }
+
+      relationshipsProvider.showForm({ type: 'addRelationship', subject, predicates, rangeEntities });
     }),
 
     vscode.commands.registerCommand('kgExplorer.commitAddRel', async (subject: string, predicate: string, value: string, isObject: boolean) => {

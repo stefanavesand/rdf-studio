@@ -193,21 +193,6 @@
           "group": "navigation"
         },
         {
-          "command": "kgExplorer.newInstance",
-          "when": "viewItem == class",
-          "group": "1_create"
-        },
-        {
-          "command": "kgExplorer.newProperty",
-          "when": "viewItem == class",
-          "group": "1_create"
-        },
-        {
-          "command": "kgExplorer.renameEntity",
-          "when": "viewItem == class || viewItem == instance",
-          "group": "5_modify"
-        },
-        {
           "command": "kgExplorer.deleteClass",
           "when": "viewItem == class",
           "group": "7_danger"

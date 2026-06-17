@@ -64,6 +64,8 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
         this.showForm({ type: msg.editType, iri: msg.iri, ns: msg.iri, label: msg.label, comment: msg.comment });
       } else if (msg.type === 'saveEdit') {
         vscode.commands.executeCommand('kgExplorer.saveEdit', msg.editType, msg.iri, msg.label, msg.comment, msg.ns);
+      } else if (msg.type === 'newInst') {
+        vscode.commands.executeCommand('kgExplorer.newInstance', { kind: 'class', data: { iri: msg.classIri, label: msg.className } });
       } else if (msg.type === 'newProp') {
         vscode.commands.executeCommand('kgExplorer.newProperty', { kind: 'class', data: { iri: msg.classIri, label: msg.className } });
       } else if (msg.type === 'createProperty') {
@@ -386,8 +388,11 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
       h += `</div>`;
     }
 
-    // add property button
-    h += `<div style="padding:10px 14px 14px"><button class="add-rel-btn" data-action="newProp" data-class-iri="${esc(classIri)}" data-class-name="${esc(classLabel)}"><span class="codicon codicon-add"></span>Add property</button></div>`;
+    // action buttons
+    h += `<div style="padding:10px 14px 14px; display:flex; gap:8px">`;
+    h += `<button class="add-rel-btn" data-action="newProp" data-class-iri="${esc(classIri)}" data-class-name="${esc(classLabel)}"><span class="codicon codicon-add"></span>Add property</button>`;
+    h += `<button class="add-rel-btn" data-action="newInst" data-class-iri="${esc(classIri)}" data-class-name="${esc(classLabel)}"><span class="codicon codicon-add"></span>New instance</button>`;
+    h += `</div>`;
 
     // used but not declared
     if (usedOnlyProps.length > 0) {
@@ -1309,51 +1314,95 @@ function foSubmit() {
 
 function addRelForm(form) {
   let opts = '';
+  var predRanges = {};
   if (form.predicates) {
-    for (const p of form.predicates) {
-      opts += '<option value="' + esc2(p.iri) + '">' + esc2(p.label) + (p.range ? ' → ' + esc2(p.range) : '') + '</option>';
+    for (var pi = 0; pi < form.predicates.length; pi++) {
+      var p = form.predicates[pi];
+      opts += '<option value="' + esc2(p.iri) + '" data-range="' + esc2(p.rangeIri || '') + '">' + esc2(p.label) + (p.range ? ' → ' + esc2(p.range) : '') + '</option>';
+      if (p.rangeIri) predRanges[p.iri] = p.rangeIri;
+    }
+  }
+  var entityOptsMap = {};
+  if (form.rangeEntities) {
+    for (var rk in form.rangeEntities) {
+      var ents = form.rangeEntities[rk];
+      var eopts = '';
+      for (var ei = 0; ei < ents.length; ei++) {
+        eopts += '<option value="' + esc2(ents[ei].iri) + '">' + esc2(ents[ei].label) + '</option>';
+      }
+      entityOptsMap[rk] = eopts;
     }
   }
   return '<div class="form-card">'
     + '<div class="form-header"><span class="codicon codicon-add" style="font-size:16px;color:var(--accent)"></span><span class="form-header-title">Add Relationship</span><span class="codicon codicon-close" data-action="closeForm" title="Cancel" style="font-size:15px;color:var(--fg-muted);cursor:pointer"></span></div>'
     + '<div class="form-body">'
     + '<div class="form-field"><div class="form-label"><span class="form-label-text">Property</span></div><select class="form-input" id="ar-pred" style="height:28px" data-oninput="arUpdate">' + opts + '</select></div>'
-    + '<div class="form-field"><div class="form-label"><span class="form-label-text">Value</span><span class="form-label-hint" id="ar-hint"></span></div><input class="form-input" id="ar-value" placeholder="Enter value or pick entity..." data-oninput="arUpdate"><button class="form-btn form-btn-secondary" id="ar-pick" data-action="arPick" style="margin-top:6px;display:none">Pick entity...</button></div>'
+    + '<div class="form-field" id="ar-value-field"><div class="form-label"><span class="form-label-text">Value</span><span class="form-label-hint" id="ar-hint"></span></div><input class="form-input" id="ar-value" placeholder="Enter value..." data-oninput="arUpdate"></div>'
+    + '<div class="form-field" id="ar-entity-field" style="display:none"><div class="form-label"><span class="form-label-text">Entity</span><span class="form-label-hint" id="ar-entity-hint"></span></div><select class="form-input" id="ar-entity" style="height:28px" data-oninput="arUpdate"></select></div>'
     + '<input type="hidden" id="ar-subject" value="' + esc2(form.subject || '') + '">'
     + '<input type="hidden" id="ar-isObject" value="false">'
     + '<input type="hidden" id="ar-range" value="">'
+    + '<input type="hidden" id="ar-entity-opts" value="' + esc2(JSON.stringify(entityOptsMap)) + '">'
+    + '<input type="hidden" id="ar-pred-ranges" value="' + esc2(JSON.stringify(predRanges)) + '">'
     + '<div class="form-actions"><button class="form-btn form-btn-secondary" data-action="closeForm">Cancel</button><button class="form-btn form-btn-primary" id="ar-submit" data-action="arSubmit" disabled>Add</button></div>'
     + '</div></div>';
 }
 
 function arUpdate() {
-  const pred = document.getElementById('ar-pred');
-  const value = document.getElementById('ar-value');
-  const submit = document.getElementById('ar-submit');
-  const pick = document.getElementById('ar-pick');
-  const hint = document.getElementById('ar-hint');
-  const isObjEl = document.getElementById('ar-isObject');
-  const rangeEl = document.getElementById('ar-range');
-  if (!pred || !value || !submit) return;
-  const opt = pred.options[pred.selectedIndex];
-  const label = opt ? opt.textContent : '';
-  const hasArrow = label.includes('→');
-  const rangeName = hasArrow ? label.split('→')[1].trim() : '';
-  if (hint) hint.textContent = rangeName ? 'Expected: ' + rangeName : '';
-  if (pick) pick.style.display = hasArrow ? 'inline-flex' : 'none';
-  if (isObjEl) isObjEl.value = hasArrow ? 'true' : 'false';
-  if (rangeEl) rangeEl.value = rangeName;
-  if (submit) submit.disabled = !value.value;
+  var pred = document.getElementById('ar-pred');
+  var value = document.getElementById('ar-value');
+  var entitySel = document.getElementById('ar-entity');
+  var valueField = document.getElementById('ar-value-field');
+  var entityField = document.getElementById('ar-entity-field');
+  var submit = document.getElementById('ar-submit');
+  var hint = document.getElementById('ar-hint');
+  var entityHint = document.getElementById('ar-entity-hint');
+  var isObjEl = document.getElementById('ar-isObject');
+  var rangeEl = document.getElementById('ar-range');
+  var entityOptsEl = document.getElementById('ar-entity-opts');
+  var predRangesEl = document.getElementById('ar-pred-ranges');
+  if (!pred || !submit) return;
+  var opt = pred.options[pred.selectedIndex];
+  var label = opt ? opt.textContent : '';
+  var hasArrow = label.includes('→');
+  var rangeName = hasArrow ? label.split('→')[1].trim() : '';
+  var predRanges = {};
+  var entityOpts = {};
+  try { predRanges = JSON.parse(predRangesEl ? predRangesEl.value : '{}'); } catch(e) {}
+  try { entityOpts = JSON.parse(entityOptsEl ? entityOptsEl.value : '{}'); } catch(e) {}
+  var rangeIri = predRanges[pred.value] || '';
+  var hasEntities = rangeIri && entityOpts[rangeIri] && entityOpts[rangeIri].length > 0;
+  if (hasEntities && entitySel && valueField && entityField) {
+    valueField.style.display = 'none';
+    entityField.style.display = '';
+    entitySel.innerHTML = entityOpts[rangeIri];
+    if (entityHint) entityHint.textContent = rangeName;
+    if (isObjEl) isObjEl.value = 'true';
+    if (rangeEl) rangeEl.value = rangeName;
+    submit.disabled = !entitySel.value;
+  } else {
+    if (valueField) valueField.style.display = '';
+    if (entityField) entityField.style.display = 'none';
+    if (hint) hint.textContent = rangeName ? 'Expected: ' + rangeName : '';
+    if (isObjEl) isObjEl.value = hasArrow ? 'true' : 'false';
+    if (rangeEl) rangeEl.value = rangeName;
+    submit.disabled = !(value && value.value);
+  }
 }
 
 function arSubmit() {
-  const pred = document.getElementById('ar-pred');
-  const value = document.getElementById('ar-value');
-  const subject = document.getElementById('ar-subject');
-  const isObj = document.getElementById('ar-isObject');
-  if (!pred || !value || !subject) return;
-  const isObject = isObj && isObj.value === 'true';
-  vscode.postMessage({ type: 'commitAddRel', subject: subject.value, predicate: pred.value, value: value.value, isObject: isObject });
+  var pred = document.getElementById('ar-pred');
+  var value = document.getElementById('ar-value');
+  var entitySel = document.getElementById('ar-entity');
+  var entityField = document.getElementById('ar-entity-field');
+  var subject = document.getElementById('ar-subject');
+  var isObj = document.getElementById('ar-isObject');
+  if (!pred || !subject) return;
+  var useEntity = entityField && entityField.style.display !== 'none' && entitySel && entitySel.value;
+  var val = useEntity ? entitySel.value : (value ? value.value : '');
+  if (!val) return;
+  var isObject = useEntity || (isObj && isObj.value === 'true');
+  vscode.postMessage({ type: 'commitAddRel', subject: subject.value, predicate: pred.value, value: val, isObject: isObject });
   closeForm();
   showToast('Relationship added', false);
 }
@@ -1377,6 +1426,7 @@ const actionHandlers = {
   newClass: (el) => vscode.postMessage({type:'newClass',ns:el.dataset.ns||''}),
   newProperty: (el) => vscode.postMessage({type:'newProperty',ns:el.dataset.ns||''}),
   newProp: (el) => vscode.postMessage({type:'newProp',classIri:el.dataset.classIri||'',className:el.dataset.className||''}),
+  newInst: (el) => vscode.postMessage({type:'newInst',classIri:el.dataset.classIri||'',className:el.dataset.className||''}),
   addImport: (el) => vscode.postMessage({type:'addImport',ns:el.dataset.ns||''}),
   removeImport: (el) => vscode.postMessage({type:'removeImport',ns:el.dataset.ns||'',import:el.dataset.import||''})
 };

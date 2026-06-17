@@ -101,8 +101,8 @@ export class TurtleEditor {
 
     const subjectLine = loc.line;
     const blockEnd = this.findBlockEnd(lines, subjectLine);
-    const predCompact = this.store.compact(predicateIri);
-    const objText = isLiteral ? `"${objectValue}"` : this.store.compact(objectValue);
+    const predCompact = this.safeCompact(predicateIri);
+    const objText = isLiteral ? `"${objectValue}"` : this.safeCompact(objectValue);
 
     const lastLine = lines[blockEnd];
     const indent = this.detectIndent(lines, subjectLine, blockEnd);
@@ -133,10 +133,10 @@ export class TurtleEditor {
 
     const doc = await vscode.workspace.openTextDocument(fileUri);
     const text = doc.getText();
-    const subjCompact = this.store.compact(subjectIri);
-    const typeCompact = this.store.compact(typeIri);
-    const predCompact = this.store.compact(predicateIri);
-    const objText = isLiteral ? `"${objectValue}"` : this.store.compact(objectValue);
+    const subjCompact = this.safeCompact(subjectIri);
+    const typeCompact = this.safeCompact(typeIri);
+    const predCompact = this.safeCompact(predicateIri);
+    const objText = isLiteral ? `"${objectValue}"` : this.safeCompact(objectValue);
 
     const newBlock = `\n${subjCompact} a ${typeCompact} ;\n    ${predCompact} ${objText} .\n`;
 
@@ -239,6 +239,11 @@ export class TurtleEditor {
     }
 
     return matchers.filter(m => m && m.length > 1);
+  }
+
+  private safeCompact(iri: string): string {
+    const compacted = this.store.compact(iri);
+    return compacted.includes(':') ? compacted : `<${iri}>`;
   }
 
   private detectIndent(lines: string[], startLine: number, endLine: number): string {
