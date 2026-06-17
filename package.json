@@ -48,7 +48,7 @@
         },
         {
           "id": "kgExplorer.relationships",
-          "name": "Relationships",
+          "name": "Details",
           "type": "webview"
         }
       ]
@@ -150,6 +150,12 @@
         "title": "Delete Entity...",
         "icon": "$(trash)",
         "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.deleteOntology",
+        "title": "Delete Ontology...",
+        "icon": "$(trash)",
+        "category": "KG Explorer"
       }
     ],
     "menus": {
@@ -209,6 +215,11 @@
         {
           "command": "kgExplorer.deleteEntity",
           "when": "viewItem == instance",
+          "group": "7_danger"
+        },
+        {
+          "command": "kgExplorer.deleteOntology",
+          "when": "viewItem == namespace",
           "group": "7_danger"
         },
         {

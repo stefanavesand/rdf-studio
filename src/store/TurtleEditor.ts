@@ -60,6 +60,37 @@ export class TurtleEditor {
     return false;
   }
 
+  async deleteSubjectBlock(subjectIri: string): Promise<boolean> {
+    const loc = this.store.getDefinitionLocation(subjectIri);
+    if (!loc) { return false; }
+
+    const doc = await vscode.workspace.openTextDocument(loc.uri);
+    const text = doc.getText();
+    const lines = text.split('\n');
+
+    const startLine = loc.line;
+    const blockEnd = this.findBlockEnd(lines, startLine);
+
+    // expand upward to include blank lines before the block
+    let deleteStart = startLine;
+    while (deleteStart > 0 && lines[deleteStart - 1].trim() === '') {
+      deleteStart--;
+    }
+
+    // expand downward to include trailing blank line
+    let deleteEnd = blockEnd + 1;
+    if (deleteEnd < lines.length && lines[deleteEnd].trim() === '') {
+      deleteEnd++;
+    }
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.delete(doc.uri, new vscode.Range(deleteStart, 0, deleteEnd, 0));
+
+    const ok = await vscode.workspace.applyEdit(edit);
+    if (ok) { await doc.save(); }
+    return ok;
+  }
+
   async addTriple(subjectIri: string, predicateIri: string, objectValue: string, isLiteral: boolean): Promise<boolean> {
     const loc = this.store.getDefinitionLocation(subjectIri);
     if (!loc) { return false; }

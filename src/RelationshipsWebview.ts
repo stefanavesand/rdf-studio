@@ -1175,28 +1175,45 @@ function edSubmit() {
 }
 
 function newPropertyForm(form) {
-  var rangeOpts = '';
+  var classOpts = '';
   if (form.classes && form.classes.length > 0) {
-    rangeOpts += '<optgroup label="Entity types">';
     for (var ci = 0; ci < form.classes.length; ci++) {
-      rangeOpts += '<option value="' + esc2(form.classes[ci].iri) + '">' + esc2(form.classes[ci].label) + '</option>';
+      classOpts += '<option value="' + esc2(form.classes[ci].iri) + '">' + esc2(form.classes[ci].label) + '</option>';
     }
-    rangeOpts += '</optgroup>';
   }
-  rangeOpts += '<optgroup label="Datatypes">'
-    + '<option value="xsd:string">string</option><option value="xsd:integer">integer</option>'
+  var dtOpts = '<option value="xsd:string">string</option><option value="xsd:integer">integer</option>'
     + '<option value="xsd:decimal">decimal</option><option value="xsd:boolean">boolean</option>'
     + '<option value="xsd:date">date</option><option value="xsd:dateTime">dateTime</option>'
-    + '<option value="xsd:anyURI">anyURI</option></optgroup>';
+    + '<option value="xsd:anyURI">anyURI</option>';
   return '<div class="form-card">'
     + '<div class="form-header"><span class="codicon codicon-symbol-field" style="font-size:16px;color:var(--accent)"></span><span class="form-header-title">New Property</span><span class="form-header-sub">on ' + esc2(form.className || '') + '</span><span class="codicon codicon-close" data-action="closeForm" title="Cancel" style="font-size:15px;color:var(--fg-muted);cursor:pointer"></span></div>'
     + '<div class="form-body">'
     + '<div class="form-field"><div class="form-label"><span class="form-label-text">Property name</span><span class="form-label-hint">camelCase</span></div><input class="form-input" id="fp-name" placeholder="myProperty" data-oninput="fpUpdate"></div>'
-    + '<div class="form-field"><div class="form-label"><span class="form-label-text">Range</span><span class="form-label-hint">target type or datatype</span></div><select class="form-input" id="fp-range" style="height:28px" data-oninput="fpUpdate">' + rangeOpts + '</select></div>'
+    + '<div class="form-field"><div class="form-label"><span class="form-label-text">Kind</span></div><select class="form-input" id="fp-kind" style="height:28px" data-oninput="fpKindChange"><option value="object">Object Property (→ entity)</option><option value="datatype">Datatype Property (→ value)</option></select></div>'
+    + '<div class="form-field"><div class="form-label"><span class="form-label-text">Range</span><span class="form-label-hint" id="fp-range-hint">target class</span></div><select class="form-input" id="fp-range" style="height:28px" data-oninput="fpUpdate">' + classOpts + '</select></div>'
     + '<div class="form-field"><div class="form-label"><span class="form-label-text">Label</span></div><input class="form-input" id="fp-label" placeholder="Display label" data-oninput="fpUpdate"></div>'
     + '<input type="hidden" id="fp-classIri" value="' + esc2(form.classIri || '') + '">'
+    + '<input type="hidden" id="fp-class-opts" value="' + esc2(classOpts) + '">'
+    + '<input type="hidden" id="fp-dt-opts" value="' + esc2(dtOpts) + '">'
     + '<div class="form-actions"><button class="form-btn form-btn-secondary" data-action="closeForm">Cancel</button><button class="form-btn form-btn-primary" id="fp-submit" data-action="fpSubmit" disabled>Add Property</button></div>'
     + '</div></div>';
+}
+
+function fpKindChange() {
+  var kindSel = document.getElementById('fp-kind');
+  var rangeSel = document.getElementById('fp-range');
+  var rangeHint = document.getElementById('fp-range-hint');
+  var classOptsEl = document.getElementById('fp-class-opts');
+  var dtOptsEl = document.getElementById('fp-dt-opts');
+  if (!kindSel || !rangeSel || !classOptsEl || !dtOptsEl) return;
+  if (kindSel.value === 'datatype') {
+    rangeSel.innerHTML = dtOptsEl.value;
+    if (rangeHint) rangeHint.textContent = 'value type';
+  } else {
+    rangeSel.innerHTML = classOptsEl.value;
+    if (rangeHint) rangeHint.textContent = 'target class';
+  }
+  fpUpdate();
 }
 
 function fpUpdate() {
@@ -1217,9 +1234,10 @@ function fpSubmit() {
   var label = document.getElementById('fp-label');
   var classIri = document.getElementById('fp-classIri');
   var rangeSel = document.getElementById('fp-range');
-  if (!name || !name.value || !classIri || !rangeSel) return;
+  var kindSel = document.getElementById('fp-kind');
+  if (!name || !name.value || !classIri || !rangeSel || !kindSel) return;
   var range = rangeSel.value;
-  var kind = range.startsWith('xsd:') ? 'datatype' : 'object';
+  var kind = kindSel.value;
   vscode.postMessage({ type: 'createProperty', name: name.value, label: label ? label.value : name.value, kind: kind, range: range, classIri: classIri.value });
   closeForm();
   showToast('Added property "' + (label ? label.value : name.value) + '"', false);
@@ -1352,7 +1370,7 @@ function esc2(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/
 
 // event delegation for data-action buttons
 const actionHandlers = {
-  closeForm, fcSubmit, fiSubmit, foSubmit, fpSubmit, edSubmit, arSubmit, arPick: arPickEntity,
+  closeForm, fcSubmit, fiSubmit, foSubmit, fpSubmit, fpKindChange, edSubmit, arSubmit, arPick: arPickEntity,
   editOntology: (el) => vscode.postMessage({type:'showEditForm',editType:'editOntology',iri:el.dataset.ns||'',label:el.dataset.label||'',comment:el.dataset.comment||''}),
   editClass: (el) => vscode.postMessage({type:'showEditForm',editType:'editClass',iri:el.dataset.iri||'',label:el.dataset.label||'',comment:el.dataset.comment||''}),
   editEntity: (el) => vscode.postMessage({type:'showEditForm',editType:'editEntity',iri:el.dataset.iri||'',label:el.dataset.label||'',comment:el.dataset.comment||''}),
@@ -1367,7 +1385,7 @@ document.addEventListener('click', e => {
   if (el) { const fn = actionHandlers[el.dataset.action]; if (fn) fn(el); }
 });
 // event delegation for data-oninput
-const inputHandlers = { fcUpdate, fiUpdate, foUpdate, fpUpdate, arUpdate };
+const inputHandlers = { fcUpdate, fiUpdate, foUpdate, fpUpdate, fpKindChange, arUpdate };
 document.addEventListener('input', e => {
   const el = e.target.closest('[data-oninput]');
   if (el) { const fn = inputHandlers[el.dataset.oninput]; if (fn) fn(); }

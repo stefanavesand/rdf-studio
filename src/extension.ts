@@ -323,19 +323,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         classLabel = classIri ? store.localName(classIri) : undefined;
       }
 
-      // get all classes for the range picker
+      // get all classes for the range picker, prefixed to disambiguate
       const classRows = store.query(`
-        SELECT ?cls ?label WHERE {
+        SELECT DISTINCT ?cls ?label WHERE {
           ?cls a owl:Class .
           OPTIONAL { ?cls rdfs:label ?label }
-        } ORDER BY ?label LIMIT 100
+        } ORDER BY ?label LIMIT 200
       `);
+      const seen = new Set<string>();
       const classes = classRows
-        .filter(r => !store.localName(r.get('cls')!.value).startsWith('http'))
-        .map(r => ({
-          iri: r.get('cls')!.value,
-          label: r.get('label')?.value ?? store.localName(r.get('cls')!.value),
-        }));
+        .filter(r => {
+          const iri = r.get('cls')!.value;
+          if (seen.has(iri) || store.localName(iri).startsWith('http')) { return false; }
+          seen.add(iri);
+          return true;
+        })
+        .map(r => {
+          const iri = r.get('cls')!.value;
+          const localName = r.get('label')?.value ?? store.localName(iri);
+          const compact = store.compact(iri);
+          const prefix = compact.includes(':') ? compact.split(':')[0] + ':' : '';
+          return { iri, label: prefix ? `${localName} (${prefix})` : localName };
+        });
 
       relationshipsProvider.showForm({
         type: 'newProperty',
@@ -585,16 +594,64 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.window.showInformationMessage('Rename — coming in Phase 5');
     }),
 
+    vscode.commands.registerCommand('kgExplorer.deleteOntology', async (arg: unknown) => {
+      let ns = '';
+      if (typeof arg === 'object' && arg !== null && 'kind' in arg && (arg as any).kind === 'namespace') {
+        ns = (arg as any).ns;
+      }
+      if (!ns) { return; }
+      const ontIri = ns.endsWith('#') ? ns.slice(0, -1) : ns.endsWith('/') ? ns.slice(0, -1) : ns;
+      const label = store.getLabel(ns) || store.getLabel(ontIri) || store.localName(ns) || ns;
+      const answer = await vscode.window.showWarningMessage(
+        `Delete ontology "${label}" and its declaration block? Classes and instances will NOT be deleted.`,
+        { modal: true }, 'Delete'
+      );
+      if (answer !== 'Delete') { return; }
+      let ok = await editor.deleteSubjectBlock(ns);
+      if (!ok) { ok = await editor.deleteSubjectBlock(ontIri); }
+      if (!ok) { ok = await editor.deleteSubjectBlock(ns + '>'); }
+      if (ok) {
+        await loadAllTtl();
+        vscode.window.showInformationMessage(`Deleted ontology: ${label}`);
+      } else {
+        vscode.window.showWarningMessage(`Could not find ontology declaration for "${label}".`);
+      }
+    }),
+
     vscode.commands.registerCommand('kgExplorer.deleteClass', async (arg: unknown) => {
       const iri = extractIri(arg);
       if (!iri) { return; }
-      vscode.window.showInformationMessage('Delete Class — coming in Phase 5');
+      const label = store.getLabel(iri) || store.localName(iri) || iri;
+      const answer = await vscode.window.showWarningMessage(
+        `Delete class "${label}" and all its triples? Instances of this class will NOT be deleted.`,
+        { modal: true }, 'Delete'
+      );
+      if (answer !== 'Delete') { return; }
+      const ok = await editor.deleteSubjectBlock(iri);
+      if (ok) {
+        await loadAllTtl();
+        vscode.window.showInformationMessage(`Deleted class: ${label}`);
+      } else {
+        vscode.window.showWarningMessage(`Could not find "${label}" in any TTL file.`);
+      }
     }),
 
     vscode.commands.registerCommand('kgExplorer.deleteEntity', async (arg: unknown) => {
       const iri = extractIri(arg);
       if (!iri) { return; }
-      vscode.window.showInformationMessage('Delete Entity — coming in Phase 5');
+      const label = store.getLabel(iri) || store.localName(iri) || iri;
+      const answer = await vscode.window.showWarningMessage(
+        `Delete "${label}" and all its triples?`,
+        { modal: true }, 'Delete'
+      );
+      if (answer !== 'Delete') { return; }
+      const ok = await editor.deleteSubjectBlock(iri);
+      if (ok) {
+        await loadAllTtl();
+        vscode.window.showInformationMessage(`Deleted: ${label}`);
+      } else {
+        vscode.window.showWarningMessage(`Could not find "${label}" in any TTL file.`);
+      }
     }),
 
     vscode.commands.registerCommand('kgExplorer.editValue', async (subject: string, predicate: string, oldValue: string, newValue: string) => {
@@ -646,6 +703,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const text = doc.getText();
       const defaultPrefixMatch = text.match(/@prefix\s+:\s*<([^>]+)>/);
       const instanceNs = defaultPrefixMatch ? defaultPrefixMatch[1] : '';
+      if (!instanceNs) {
+        vscode.window.showWarningMessage('No default prefix (@prefix : <...>) found in target file. Cannot create instance.');
+        return;
+      }
       const instanceIri = instanceNs + localName;
       const subjCompact = store.compact(instanceIri) || `:${localName}`;
       const typeCompact = store.compact(classIri);
@@ -703,7 +764,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const lastLine = doc.lineCount - 1;
       wsEdit.insert(targetFile, new vscode.Position(lastLine, doc.lineAt(lastLine).text.length), newBlock);
       const ok = await vscode.workspace.applyEdit(wsEdit);
-      if (ok) { await doc.save(); await loadAllTtl(); relationshipsProvider.select(classIri, true); revealInOntology(classIri); }
+      if (ok) {
+        await doc.save();
+        await loadAllTtl();
+        relationshipsProvider.select(classIri, true);
+        setTimeout(() => revealInOntology(classIri), 200);
+      }
     }),
 
     vscode.commands.registerCommand('kgExplorer.prepareAddRelationship', async (subject: string) => {
