@@ -18,7 +18,7 @@ jobs:
       - run: yarn install --frozen-lockfile --ignore-scripts || yarn install --ignore-scripts
       - run: npm run compile
       - run: npm test
-      - run: npx vsce package --no-dependencies
+      - run: npx vsce package
       - uses: actions/upload-artifact@v4
         with:
           name: rdf-studio.vsix
