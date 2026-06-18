@@ -67,15 +67,35 @@ export class RdfStore {
   async connectEndpoint(name: string, queryUrl: string): Promise<number> {
     if (!this.store) { this.store = new oxigraph.Store(); }
 
-    // Fetch schema only: classes, properties, and their metadata
-    const schemaQuery = 'PREFIX owl: <http://www.w3.org/2002/07/owl#> CONSTRUCT { ?s ?p ?o } WHERE { { ?s a owl:Class . ?s ?p ?o . } UNION { ?s a owl:ObjectProperty . ?s ?p ?o . } UNION { ?s a owl:DatatypeProperty . ?s ?p ?o . } UNION { ?s a owl:Ontology . ?s ?p ?o . } UNION { ?s a owl:AnnotationProperty . ?s ?p ?o . } }';
-    // Ensure URL ends with /query (Fuseki convention)
-    let baseUrl = queryUrl.replace(/\/$/, '');
+    let rootUrl = queryUrl.replace(/\/$/, '');
+    // Strip /query or /sparql suffix to get the server root
+    const serverRoot = rootUrl.replace(/\/(query|sparql)$/, '').replace(/\/[^/]+$/, '');
+    let baseUrl = rootUrl;
     if (!baseUrl.endsWith('/query') && !baseUrl.endsWith('/sparql')) {
       baseUrl += '/query';
     }
-    const url = `${baseUrl}?query=${encodeURIComponent(schemaQuery)}`;
-    let data = await this.httpGet(url, { 'Accept': 'application/n-triples' });
+
+    let data = '';
+
+    // Step 1: try fetching ontology as Turtle from /ontology endpoint (Codex pattern)
+    try {
+      const ontUrl = `${serverRoot}/ontology`;
+      const ontData = await this.httpGet(ontUrl, { 'Accept': 'text/turtle' });
+      if (ontData.includes('@prefix') || ontData.includes('PREFIX')) {
+        data = ontData;
+      }
+    } catch { /* not available, continue to SPARQL */ }
+
+    // Step 2: if no ontology endpoint, try SPARQL CONSTRUCT with graph discovery
+    if (!data) {
+      const fromClauses = await this.discoverGraphs(baseUrl);
+      const fromStr = fromClauses.length > 0
+        ? fromClauses.map(g => `FROM <${g}>`).join(' ') + ' '
+        : '';
+      const schemaQuery = `PREFIX owl: <http://www.w3.org/2002/07/owl#> CONSTRUCT { ?s ?p ?o } ${fromStr}WHERE { { ?s a owl:Class . ?s ?p ?o . } UNION { ?s a owl:ObjectProperty . ?s ?p ?o . } UNION { ?s a owl:DatatypeProperty . ?s ?p ?o . } UNION { ?s a owl:Ontology . ?s ?p ?o . } UNION { ?s a owl:AnnotationProperty . ?s ?p ?o . } }`;
+      const url = `${baseUrl}?query=${encodeURIComponent(schemaQuery)}`;
+      data = await this.httpGet(url, { 'Accept': 'application/n-triples' });
+    }
 
     // Detect format: N-Triples starts with '<', Turtle starts with PREFIX/@prefix
     let format: string;
@@ -330,6 +350,53 @@ export class RdfStore {
       });
     }
     return [...grouped.values()];
+  }
+
+  private async discoverGraphs(queryUrl: string): Promise<string[]> {
+    // Step 1: check if default graph has data
+    try {
+      const probeUrl = `${queryUrl}?query=${encodeURIComponent('SELECT * WHERE { ?s ?p ?o } LIMIT 1')}`;
+      const probe = await this.httpGet(probeUrl, { 'Accept': 'application/sparql-results+json' });
+      const probeResult = JSON.parse(probe);
+      if (probeResult.results?.bindings?.length > 0) {
+        return []; // default graph has data, no FROM needed
+      }
+    } catch { /* continue to discovery */ }
+
+    // Step 2: look for Codex-style snapshot pointer
+    try {
+      const snapshotQuery = 'SELECT ?snap WHERE { GRAPH <urn:x-codex:meta:pointer> { <urn:x-codex:meta:system> <urn:x-codex:meta:activeSnapshot> ?snap } }';
+      const snapUrl = `${queryUrl}?query=${encodeURIComponent(snapshotQuery)}`;
+      const snapData = await this.httpGet(snapUrl, { 'Accept': 'application/sparql-results+json' });
+      const snapResult = JSON.parse(snapData);
+      const snapshot = snapResult.results?.bindings?.[0]?.snap?.value;
+      if (snapshot) {
+        const graphs = [
+          'urn:x-codex:graph:reference',
+          'urn:x-codex:graph:contributed',
+          snapshot,
+        ];
+        console.log(`[RDF Studio] Discovered named graphs: ${graphs.join(', ')}`);
+        return graphs;
+      }
+    } catch { /* continue */ }
+
+    // Step 3: try listing named graphs directly (with short timeout)
+    try {
+      const listQuery = 'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 20';
+      const listUrl = `${queryUrl}?query=${encodeURIComponent(listQuery)}`;
+      const listData = await this.httpGet(listUrl, { 'Accept': 'application/sparql-results+json' });
+      const listResult = JSON.parse(listData);
+      const graphs = (listResult.results?.bindings ?? [])
+        .map((b: any) => b.g?.value)
+        .filter((g: string) => g && !g.includes('meta:'));
+      if (graphs.length > 0) {
+        console.log(`[RDF Studio] Discovered ${graphs.length} named graphs`);
+        return graphs;
+      }
+    } catch { /* default graph it is */ }
+
+    return [];
   }
 
   private httpGet(url: string, headers?: Record<string, string>): Promise<string> {

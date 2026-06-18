@@ -30,6 +30,17 @@ function isOwlClass(iri: string): boolean {
   return rows.length > 0;
 }
 
+interface SavedEndpoint { name: string; url: string }
+const ENDPOINTS_KEY = 'rdfStudio.savedEndpoints';
+
+function getSavedEndpoints(context: vscode.ExtensionContext): SavedEndpoint[] {
+  return context.workspaceState.get<SavedEndpoint[]>(ENDPOINTS_KEY, []);
+}
+
+function saveEndpoints(context: vscode.ExtensionContext, endpoints: SavedEndpoint[]): void {
+  context.workspaceState.update(ENDPOINTS_KEY, endpoints);
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   store = new RdfStore();
 
@@ -1107,6 +1118,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         async () => {
           try {
             const count = await store.connectEndpoint(name, url);
+            // Persist for restart
+            const saved = getSavedEndpoints(context);
+            if (!saved.some(e => e.url === url)) {
+              saved.push({ name, url });
+              saveEndpoints(context, saved);
+            }
             ontologyProvider.refresh();
             vscode.window.showInformationMessage(`Connected to ${name}: loaded ${count.toLocaleString()} triples`);
           } catch (err: any) {
@@ -1116,13 +1133,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
     }),
 
-    vscode.commands.registerCommand('kgExplorer.disconnectEndpoint', async (arg: unknown) => {
-      if (typeof arg === 'object' && arg !== null && 'remoteUrl' in arg) {
-        const url = (arg as any).remoteUrl;
-        store.disconnectEndpoint(url);
-        await loadAllTtl();
-        vscode.window.showInformationMessage('Disconnected endpoint');
+    vscode.commands.registerCommand('kgExplorer.disconnectEndpoint', async () => {
+      const remotes = store.getRemoteEndpoints();
+      if (remotes.size === 0) {
+        vscode.window.showInformationMessage('No remote endpoints connected.');
+        return;
       }
+      const items = [...remotes.entries()].map(([url, ep]) => ({
+        label: ep.name,
+        detail: url,
+        url,
+      }));
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Select endpoint to disconnect...',
+      });
+      if (!picked) { return; }
+      store.disconnectEndpoint(picked.url);
+      // Remove from persistence
+      const saved = getSavedEndpoints(context).filter(e => e.url !== picked.url);
+      saveEndpoints(context, saved);
+      await loadAllTtl();
+      vscode.window.showInformationMessage(`Disconnected: ${picked.label}`);
     }),
 
     vscode.languages.registerHoverProvider(turtleSelector, new TurtleHoverProvider(store)),
@@ -1151,9 +1182,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(watcher);
 
   await loadAllTtl();
-  await connectConfiguredEndpoints();
-  if (store.tripleCount > 0) {
-    vscode.window.showInformationMessage(`KG Explorer: Loaded ${store.tripleCount} triples from workspace`);
+  const localCount = store.tripleCount;
+  await connectSavedEndpoints(context);
+  const totalCount = store.tripleCount;
+  if (totalCount > 0) {
+    const remoteCount = totalCount - localCount;
+    const parts = [];
+    if (localCount > 0) { parts.push(`${localCount.toLocaleString()} local`); }
+    if (remoteCount > 0) { parts.push(`${remoteCount.toLocaleString()} remote`); }
+    vscode.window.showInformationMessage(`KG Explorer: ${parts.join(' + ')} triples`);
   }
 }
 
@@ -1174,10 +1211,21 @@ async function loadAllTtl(): Promise<void> {
   }
 }
 
-async function connectConfiguredEndpoints(): Promise<void> {
+async function connectSavedEndpoints(ctx: vscode.ExtensionContext): Promise<void> {
+  // 1. From workspaceState (previously connected via globe icon)
+  const saved = getSavedEndpoints(ctx);
+  for (const ep of saved) {
+    if (!store.getRemoteEndpoints().has(ep.url)) {
+      try {
+        await store.connectEndpoint(ep.name, ep.url);
+      } catch { /* silent — endpoint may be offline */ }
+    }
+  }
+
+  // 2. From settings.json (rdfStudio.sparqlEndpoints)
   const config = vscode.workspace.getConfiguration('rdfStudio');
-  const endpoints = config.get<{ name: string; url: string; dataset?: string }[]>('sparqlEndpoints', []);
-  for (const ep of endpoints) {
+  const configured = config.get<{ name: string; url: string; dataset?: string }[]>('sparqlEndpoints', []);
+  for (const ep of configured) {
     const url = ep.dataset ? `${ep.url.replace(/\/$/, '')}/${ep.dataset}/query` : ep.url;
     if (!store.getRemoteEndpoints().has(url)) {
       try {

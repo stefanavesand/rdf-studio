@@ -179,6 +179,11 @@
           "group": "navigation"
         },
         {
+          "command": "kgExplorer.disconnectEndpoint",
+          "when": "view == kgExplorer.ontology",
+          "group": "navigation"
+        },
+        {
           "command": "kgExplorer.newOntology",
           "when": "view == kgExplorer.ontology",
           "group": "navigation"
@@ -248,7 +253,8 @@
             "properties": {
               "name": { "type": "string", "description": "Display name" },
               "url": { "type": "string", "description": "SPARQL query endpoint URL" },
-              "dataset": { "type": "string", "description": "Dataset/graph name (appended to URL)" }
+              "dataset": { "type": "string", "description": "Dataset/graph name (appended to URL)" },
+              "graphs": { "type": "array", "items": { "type": "string" }, "description": "Named graph URIs to include via FROM clauses (auto-discovered if omitted)" }
             },
             "required": ["name", "url"]
           },
