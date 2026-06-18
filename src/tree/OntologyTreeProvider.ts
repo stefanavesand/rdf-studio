@@ -147,12 +147,17 @@ export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     const hierarchy = this.store.getClassHierarchy();
     const prefixes = this.store.getPrefixes();
 
+    // Collect ALL classes (including nested subclasses) grouped by namespace
     const nsMap = new Map<string, ClassInfo[]>();
-    for (const cls of hierarchy) {
-      const ns = this.extractNamespace(cls.iri);
-      if (!nsMap.has(ns)) { nsMap.set(ns, []); }
-      nsMap.get(ns)!.push(cls);
-    }
+    const collectAll = (classes: ClassInfo[]) => {
+      for (const cls of classes) {
+        const ns = this.extractNamespace(cls.iri);
+        if (!nsMap.has(ns)) { nsMap.set(ns, []); }
+        nsMap.get(ns)!.push(cls);
+        if (cls.subClasses.length > 0) { collectAll(cls.subClasses); }
+      }
+    };
+    collectAll(hierarchy);
 
     // build reverse prefix map: namespace → prefix name
     const nsToPrefix = new Map<string, string>();

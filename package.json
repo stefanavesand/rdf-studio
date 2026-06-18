@@ -157,10 +157,27 @@
         "title": "Delete Ontology...",
         "icon": "$(trash)",
         "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.connectEndpoint",
+        "title": "Connect SPARQL Endpoint...",
+        "icon": "$(globe)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.disconnectEndpoint",
+        "title": "Disconnect Endpoint",
+        "icon": "$(debug-disconnect)",
+        "category": "KG Explorer"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "kgExplorer.connectEndpoint",
+          "when": "view == kgExplorer.ontology",
+          "group": "navigation"
+        },
         {
           "command": "kgExplorer.newOntology",
           "when": "view == kgExplorer.ontology",
@@ -194,6 +211,11 @@
           "group": "navigation"
         },
         {
+          "command": "kgExplorer.disconnectEndpoint",
+          "when": "viewItem == remoteNamespace",
+          "group": "7_danger"
+        },
+        {
           "command": "kgExplorer.deleteClass",
           "when": "viewItem == class",
           "group": "7_danger"
@@ -214,6 +236,25 @@
           "group": "9_cutcopypaste"
         }
       ]
+    },
+    "configuration": {
+      "title": "RDF Studio",
+      "properties": {
+        "rdfStudio.sparqlEndpoints": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Display name" },
+              "url": { "type": "string", "description": "SPARQL query endpoint URL" },
+              "dataset": { "type": "string", "description": "Dataset/graph name (appended to URL)" }
+            },
+            "required": ["name", "url"]
+          },
+          "description": "Remote SPARQL endpoints to connect on startup"
+        }
+      }
     },
     "languages": [
       {

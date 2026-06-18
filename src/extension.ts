@@ -1085,6 +1085,46 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (ok) { await loadAllTtl(); relationshipsProvider.select(subject, false); }
     }),
 
+    vscode.commands.registerCommand('kgExplorer.connectEndpoint', async () => {
+      const url = await vscode.window.showInputBox({
+        prompt: 'SPARQL query endpoint URL',
+        placeHolder: 'http://example.org:3330/dataset/query',
+        validateInput: v => {
+          try { new URL(v); return null; } catch { return 'Invalid URL'; }
+        },
+      });
+      if (!url) { return; }
+
+      const name = await vscode.window.showInputBox({
+        prompt: 'Display name for this endpoint',
+        placeHolder: 'My Knowledge Graph',
+        value: new URL(url).hostname.split('.')[0],
+      });
+      if (!name) { return; }
+
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Connecting to ${name}...` },
+        async () => {
+          try {
+            const count = await store.connectEndpoint(name, url);
+            ontologyProvider.refresh();
+            vscode.window.showInformationMessage(`Connected to ${name}: loaded ${count.toLocaleString()} triples`);
+          } catch (err: any) {
+            vscode.window.showErrorMessage(`Failed to connect: ${err.message || err}`);
+          }
+        }
+      );
+    }),
+
+    vscode.commands.registerCommand('kgExplorer.disconnectEndpoint', async (arg: unknown) => {
+      if (typeof arg === 'object' && arg !== null && 'remoteUrl' in arg) {
+        const url = (arg as any).remoteUrl;
+        store.disconnectEndpoint(url);
+        await loadAllTtl();
+        vscode.window.showInformationMessage('Disconnected endpoint');
+      }
+    }),
+
     vscode.languages.registerHoverProvider(turtleSelector, new TurtleHoverProvider(store)),
     vscode.languages.registerDefinitionProvider(turtleSelector, new TurtleDefinitionProvider(store)),
     vscode.languages.registerCompletionItemProvider(turtleSelector, new TurtleCompletionProvider(store), ':'),
@@ -1111,15 +1151,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(watcher);
 
   await loadAllTtl();
+  await connectConfiguredEndpoints();
   if (store.tripleCount > 0) {
     vscode.window.showInformationMessage(`KG Explorer: Loaded ${store.tripleCount} triples from workspace`);
   }
 }
 
 async function loadAllTtl(): Promise<void> {
+  // save remote endpoints before reload
+  const remotes = new Map(store.getRemoteEndpoints());
+
   const files = await vscode.workspace.findFiles('**/*.ttl', '**/node_modules/**');
   if (files.length > 0) {
     await store.load(files);
+  }
+
+  // reconnect previously connected remote endpoints
+  for (const [url, ep] of remotes) {
+    try {
+      await store.connectEndpoint(ep.name, url);
+    } catch { /* silent — endpoint may be offline */ }
+  }
+}
+
+async function connectConfiguredEndpoints(): Promise<void> {
+  const config = vscode.workspace.getConfiguration('rdfStudio');
+  const endpoints = config.get<{ name: string; url: string; dataset?: string }[]>('sparqlEndpoints', []);
+  for (const ep of endpoints) {
+    const url = ep.dataset ? `${ep.url.replace(/\/$/, '')}/${ep.dataset}/query` : ep.url;
+    if (!store.getRemoteEndpoints().has(url)) {
+      try {
+        await store.connectEndpoint(ep.name, url);
+      } catch { /* silent */ }
+    }
   }
 }
 

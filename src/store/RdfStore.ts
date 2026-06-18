@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as oxigraph from 'oxigraph';
+import * as http from 'http';
+import * as https from 'https';
 
 type Term = { value: string; termType: string };
 type Row = Map<string, Term>;
@@ -60,6 +62,53 @@ export class RdfStore {
     this._onDidReload.fire();
   }
 
+  private remoteEndpoints = new Map<string, { name: string; url: string }>();
+
+  async connectEndpoint(name: string, queryUrl: string): Promise<number> {
+    if (!this.store) { this.store = new oxigraph.Store(); }
+
+    // Fetch schema only: classes, properties, and their metadata
+    const schemaQuery = 'PREFIX owl: <http://www.w3.org/2002/07/owl#> CONSTRUCT { ?s ?p ?o } WHERE { { ?s a owl:Class . ?s ?p ?o . } UNION { ?s a owl:ObjectProperty . ?s ?p ?o . } UNION { ?s a owl:DatatypeProperty . ?s ?p ?o . } UNION { ?s a owl:Ontology . ?s ?p ?o . } UNION { ?s a owl:AnnotationProperty . ?s ?p ?o . } }';
+    // Ensure URL ends with /query (Fuseki convention)
+    let baseUrl = queryUrl.replace(/\/$/, '');
+    if (!baseUrl.endsWith('/query') && !baseUrl.endsWith('/sparql')) {
+      baseUrl += '/query';
+    }
+    const url = `${baseUrl}?query=${encodeURIComponent(schemaQuery)}`;
+    let data = await this.httpGet(url, { 'Accept': 'application/n-triples' });
+
+    // Detect format: N-Triples starts with '<', Turtle starts with PREFIX/@prefix
+    let format: string;
+    const trimmed = data.trimStart();
+    if (trimmed.startsWith('<')) {
+      format = 'application/n-triples';
+    } else {
+      format = 'text/turtle';
+      // Fuseki's Turtle uses aligned spacing in PREFIX declarations that
+      // Oxigraph rejects. Normalize: collapse multiple spaces to one.
+      data = data.replace(/^(PREFIX\s+\S+)\s{2,}/gm, '$1 ')
+                 .replace(/^(@prefix\s+\S+)\s{2,}/gm, '$1 ');
+    }
+
+    if (format === 'text/turtle') { this.parsePrefixes(data); }
+
+    const before = this.store.size;
+    this.store.load(data, { format }, undefined, undefined);
+    const loaded = this.store.size - before;
+
+    this.remoteEndpoints.set(queryUrl, { name, url: queryUrl });
+    this._onDidReload.fire();
+    return loaded;
+  }
+
+  disconnectEndpoint(queryUrl: string): void {
+    this.remoteEndpoints.delete(queryUrl);
+  }
+
+  getRemoteEndpoints(): Map<string, { name: string; url: string }> {
+    return new Map(this.remoteEndpoints);
+  }
+
   query(sparql: string): Row[] {
     if (!this.store) { return []; }
     const prefixHeader = this.buildPrefixHeader();
@@ -84,6 +133,7 @@ export class RdfStore {
   }
 
   getClassHierarchy(): ClassInfo[] {
+
     const rows = this.query(`
       SELECT ?cls ?label ?parent WHERE {
         ?cls a owl:Class .
@@ -115,7 +165,7 @@ export class RdfStore {
       if (!classMap.has(cls)) {
         classMap.set(cls, { iri: cls, label, parents: new Set() });
       }
-      if (parent && !this.isStandardClass(parent)) {
+      if (parent && parent !== cls && !this.isStandardClass(parent)) {
         classMap.get(cls)!.parents.add(parent);
       }
     }
@@ -280,6 +330,24 @@ export class RdfStore {
       });
     }
     return [...grouped.values()];
+  }
+
+  private httpGet(url: string, headers?: Record<string, string>): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const parsed = new URL(url);
+      const mod = parsed.protocol === 'https:' ? https : http;
+      const opts = { headers: headers || {} };
+      mod.get(url, opts, res => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`${res.statusCode} ${res.statusMessage}`));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+        res.on('error', reject);
+      }).on('error', reject);
+    });
   }
 
   private parsePrefixes(text: string): void {
