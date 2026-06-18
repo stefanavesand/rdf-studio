@@ -159,6 +159,12 @@
         "category": "KG Explorer"
       },
       {
+        "command": "kgExplorer.addSource",
+        "title": "Add Source...",
+        "icon": "$(add)",
+        "category": "KG Explorer"
+      },
+      {
         "command": "kgExplorer.connectEndpoint",
         "title": "Connect SPARQL Endpoint...",
         "icon": "$(globe)",
@@ -166,30 +172,21 @@
       },
       {
         "command": "kgExplorer.disconnectEndpoint",
-        "title": "Disconnect Endpoint",
+        "title": "Disconnect",
         "icon": "$(debug-disconnect)",
+        "category": "KG Explorer"
+      },
+      {
+        "command": "kgExplorer.refreshSource",
+        "title": "Refresh",
+        "icon": "$(refresh)",
         "category": "KG Explorer"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "kgExplorer.connectEndpoint",
-          "when": "view == kgExplorer.ontology",
-          "group": "navigation"
-        },
-        {
-          "command": "kgExplorer.disconnectEndpoint",
-          "when": "view == kgExplorer.ontology",
-          "group": "navigation"
-        },
-        {
-          "command": "kgExplorer.newOntology",
-          "when": "view == kgExplorer.ontology",
-          "group": "navigation"
-        },
-        {
-          "command": "kgExplorer.refresh",
+          "command": "kgExplorer.addSource",
           "when": "view == kgExplorer.ontology",
           "group": "navigation"
         },
@@ -206,6 +203,16 @@
       ],
       "view/item/context": [
         {
+          "command": "kgExplorer.refreshSource",
+          "when": "viewItem == localSource || viewItem == remoteSource",
+          "group": "inline"
+        },
+        {
+          "command": "kgExplorer.disconnectEndpoint",
+          "when": "viewItem == remoteSource",
+          "group": "inline"
+        },
+        {
           "command": "kgExplorer.goToDefinition",
           "when": "viewItem == class || viewItem == instance || viewItem == iriValue || viewItem == namespace",
           "group": "navigation"
@@ -214,11 +221,6 @@
           "command": "kgExplorer.showGraph",
           "when": "viewItem == class || viewItem == instance || viewItem == iriValue",
           "group": "navigation"
-        },
-        {
-          "command": "kgExplorer.disconnectEndpoint",
-          "when": "viewItem == remoteNamespace",
-          "group": "7_danger"
         },
         {
           "command": "kgExplorer.deleteClass",

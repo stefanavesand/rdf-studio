@@ -1096,6 +1096,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (ok) { await loadAllTtl(); relationshipsProvider.select(subject, false); }
     }),
 
+    vscode.commands.registerCommand('kgExplorer.addSource', async () => {
+      const choice = await vscode.window.showQuickPick([
+        { label: '$(add) New Ontology', description: 'Create a new local TTL file', id: 'ontology' },
+        { label: '$(globe) Connect SPARQL Endpoint', description: 'Connect to a remote knowledge graph', id: 'endpoint' },
+      ], { placeHolder: 'Add source...' });
+      if (!choice) { return; }
+      if (choice.id === 'ontology') {
+        vscode.commands.executeCommand('kgExplorer.newOntology');
+      } else {
+        vscode.commands.executeCommand('kgExplorer.connectEndpoint');
+      }
+    }),
+
+    vscode.commands.registerCommand('kgExplorer.refreshSource', async (arg: unknown) => {
+      if (typeof arg === 'object' && arg !== null && 'kind' in arg && (arg as any).kind === 'source') {
+        const source = arg as any;
+        if (source.sourceType === 'local') {
+          await loadAllTtl();
+          vscode.window.showInformationMessage('Refreshed local files');
+        } else if (source.url) {
+          try {
+            const count = await store.connectEndpoint(source.name, source.url);
+            ontologyProvider.refresh();
+            vscode.window.showInformationMessage(`Refreshed ${source.name}: ${count.toLocaleString()} triples`);
+          } catch (err: any) {
+            vscode.window.showErrorMessage(`Refresh failed: ${err.message || err}`);
+          }
+        }
+      } else {
+        await loadAllTtl();
+      }
+    }),
+
     vscode.commands.registerCommand('kgExplorer.connectEndpoint', async () => {
       const url = await vscode.window.showInputBox({
         prompt: 'SPARQL query endpoint URL',
@@ -1133,27 +1166,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
     }),
 
-    vscode.commands.registerCommand('kgExplorer.disconnectEndpoint', async () => {
-      const remotes = store.getRemoteEndpoints();
-      if (remotes.size === 0) {
-        vscode.window.showInformationMessage('No remote endpoints connected.');
-        return;
+    vscode.commands.registerCommand('kgExplorer.disconnectEndpoint', async (arg: unknown) => {
+      let url: string | undefined;
+      let name: string | undefined;
+
+      // From inline button on source node
+      if (typeof arg === 'object' && arg !== null && 'kind' in arg && (arg as any).kind === 'source') {
+        url = (arg as any).url;
+        name = (arg as any).name;
       }
-      const items = [...remotes.entries()].map(([url, ep]) => ({
-        label: ep.name,
-        detail: url,
-        url,
-      }));
-      const picked = await vscode.window.showQuickPick(items, {
-        placeHolder: 'Select endpoint to disconnect...',
-      });
-      if (!picked) { return; }
-      store.disconnectEndpoint(picked.url);
-      // Remove from persistence
-      const saved = getSavedEndpoints(context).filter(e => e.url !== picked.url);
+
+      // From quick pick if no source node provided
+      if (!url) {
+        const remotes = store.getRemoteEndpoints();
+        if (remotes.size === 0) {
+          vscode.window.showInformationMessage('No remote endpoints connected.');
+          return;
+        }
+        const items = [...remotes.entries()].map(([u, ep]) => ({
+          label: ep.name, detail: u, url: u,
+        }));
+        const picked = await vscode.window.showQuickPick(items, {
+          placeHolder: 'Select endpoint to disconnect...',
+        });
+        if (!picked) { return; }
+        url = picked.url;
+        name = picked.label;
+      }
+
+      if (!url) { return; }
+      store.disconnectEndpoint(url);
+      const saved = getSavedEndpoints(context).filter(e => e.url !== url);
       saveEndpoints(context, saved);
       await loadAllTtl();
-      vscode.window.showInformationMessage(`Disconnected: ${picked.label}`);
+      vscode.window.showInformationMessage(`Disconnected: ${name ?? url}`);
     }),
 
     vscode.languages.registerHoverProvider(turtleSelector, new TurtleHoverProvider(store)),

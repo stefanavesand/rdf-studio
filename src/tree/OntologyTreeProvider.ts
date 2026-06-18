@@ -3,8 +3,9 @@ import { RdfStore, ClassInfo, InstanceInfo } from '../store/RdfStore';
 import { hueFor, hueToThemeColor } from '../typeColors';
 
 export type TreeNode =
-  | { kind: 'namespace'; ns: string; label: string; prefix: string; classes: ClassInfo[] }
-  | { kind: 'class'; data: ClassInfo; parentIri?: string }
+  | { kind: 'source'; sourceType: 'local' | 'remote'; name: string; url?: string; namespaces: TreeNode[] }
+  | { kind: 'namespace'; ns: string; label: string; prefix: string; classes: ClassInfo[]; sourceType?: 'local' | 'remote' }
+  | { kind: 'class'; data: ClassInfo; parentIri?: string; sourceType?: 'local' | 'remote' }
   | { kind: 'instance'; data: InstanceInfo; parentIri: string };
 
 export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
@@ -48,6 +49,22 @@ export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
   getTreeItem(node: TreeNode): vscode.TreeItem {
     switch (node.kind) {
+      case 'source': {
+        const item = new vscode.TreeItem(
+          node.name,
+          vscode.TreeItemCollapsibleState.Expanded,
+        );
+        if (node.sourceType === 'local') {
+          item.iconPath = new vscode.ThemeIcon('folder-library');
+          item.contextValue = 'localSource';
+        } else {
+          item.iconPath = new vscode.ThemeIcon('globe');
+          item.contextValue = 'remoteSource';
+        }
+        item.description = '';
+        item.id = `source:${node.sourceType}:${node.url ?? 'local'}`;
+        return item;
+      }
       case 'namespace': {
         const item = new vscode.TreeItem(
           node.label,
@@ -66,18 +83,18 @@ export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         return item;
       }
       case 'class': {
+        const isRemote = node.sourceType === 'remote';
+        const hasChildren = node.data.subClasses.length > 0 || node.data.instanceCount > 0 || isRemote;
         const item = new vscode.TreeItem(
           node.data.label,
-          (node.data.subClasses.length > 0 || node.data.instanceCount > 0)
-            ? vscode.TreeItemCollapsibleState.Collapsed
-            : vscode.TreeItemCollapsibleState.None
+          hasChildren ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
         );
-        item.description = `${node.data.instanceCount}`;
+        item.description = isRemote ? '' : `${node.data.instanceCount}`;
         const themeColor = hueToThemeColor(hueFor(node.data.label));
         item.iconPath = new vscode.ThemeIcon('symbol-class', new vscode.ThemeColor(themeColor));
-        item.tooltip = `${node.data.label} (${node.data.instanceCount} instances)\n${this.store.compact(node.data.iri)}`;
+        item.tooltip = `${node.data.label}${isRemote ? ' (remote)' : ` (${node.data.instanceCount} instances)`}\n${this.store.compact(node.data.iri)}`;
         item.contextValue = 'class';
-        item.id = node.data.iri;
+        item.id = `${node.sourceType ?? 'local'}:${node.data.iri}`;
         item.command = {
           command: 'kgExplorer.showProperties',
           title: 'Show Properties',
@@ -103,32 +120,58 @@ export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     }
   }
 
-  getChildren(node?: TreeNode): TreeNode[] {
+  async getChildren(node?: TreeNode): Promise<TreeNode[]> {
     if (!this.store.isLoaded) { return []; }
 
     if (!node) {
-      return this.getNamespaceGroups();
+      return this.getSourceGroups();
+    }
+
+    if (node.kind === 'source') {
+      return node.namespaces;
     }
 
     if (node.kind === 'namespace') {
+      const src = node.sourceType ?? 'local';
       return node.classes.map(c => {
-        const n: TreeNode = { kind: 'class', data: c, parentIri: `ns:${node.ns}` };
-        this.nodeIndex.set(c.iri, n);
+        const id = `${src}:${c.iri}`;
+        const n: TreeNode = { kind: 'class', data: c, parentIri: `ns:${node.ns}`, sourceType: src };
+        this.nodeIndex.set(id, n);
         return n;
       });
     }
 
     if (node.kind === 'class') {
+      const src = node.sourceType ?? 'local';
       const children: TreeNode[] = [];
+
       for (const sub of node.data.subClasses) {
-        const n: TreeNode = { kind: 'class', data: sub, parentIri: node.data.iri };
-        this.nodeIndex.set(sub.iri, n);
+        const id = `${src}:${sub.iri}`;
+        const n: TreeNode = { kind: 'class', data: sub, parentIri: node.data.iri, sourceType: src };
+        this.nodeIndex.set(id, n);
         children.push(n);
       }
-      for (const inst of this.store.getInstances(node.data.iri)) {
-        const n: TreeNode = { kind: 'instance', data: inst, parentIri: node.data.iri };
-        this.nodeIndex.set(inst.iri, n);
-        children.push(n);
+
+      if (src === 'local') {
+        // Local source: only show local instances
+        for (const inst of this.store.getInstances(node.data.iri)) {
+          const n: TreeNode = { kind: 'instance', data: inst, parentIri: node.data.iri };
+          this.nodeIndex.set(inst.iri, n);
+          children.push(n);
+        }
+      } else {
+        // Remote source: fetch instances on-demand from remote endpoint
+        try {
+          const remoteInstances = await this.store.fetchRemoteInstances(node.data.iri);
+          for (const inst of remoteInstances) {
+            const n: TreeNode = { kind: 'instance', data: inst, parentIri: node.data.iri };
+            this.nodeIndex.set(inst.iri, n);
+            children.push(n);
+          }
+          if (remoteInstances.length >= 200) {
+            children.push({ kind: 'instance', data: { iri: '', label: '⋯ showing first 200 of more results', types: [] }, parentIri: node.data.iri });
+          }
+        } catch { /* silent */ }
       }
       return children;
     }
@@ -137,10 +180,57 @@ export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 
   getParent(node: TreeNode): TreeNode | undefined {
-    if (node.kind === 'namespace') { return undefined; }
-    const parentIri = node.parentIri;
+    if (node.kind === 'source') { return undefined; }
+    if (node.kind === 'namespace') {
+      return this.nodeIndex.get(`source:${node.sourceType ?? 'local'}`) ?? undefined;
+    }
+    const parentIri = (node as any).parentIri;
     if (!parentIri) { return undefined; }
     return this.nodeIndex.get(parentIri);
+  }
+
+  private getSourceGroups(): TreeNode[] {
+    const allNamespaces = this.getNamespaceGroups();
+    const remoteEndpoints = this.store.getRemoteEndpoints();
+
+    const localNs: TreeNode[] = [];
+    const remoteNs: TreeNode[] = [];
+
+    for (const ns of allNamespaces) {
+      if (ns.kind !== 'namespace') { continue; }
+      if (this.store.hasLocalNamespace(ns.ns)) {
+        ns.sourceType = 'local';
+        localNs.push(ns);
+      } else {
+        ns.sourceType = 'remote';
+        remoteNs.push(ns);
+      }
+    }
+
+    const sources: TreeNode[] = [];
+
+    if (localNs.length > 0) {
+      const localSource: TreeNode = {
+        kind: 'source', sourceType: 'local', name: 'Local Files', namespaces: localNs,
+      };
+      this.nodeIndex.set('source:local', localSource);
+      sources.push(localSource);
+    }
+
+    if (remoteNs.length > 0) {
+      // Group remote namespaces under their endpoint names
+      const endpointNames = [...remoteEndpoints.values()].map(e => e.name);
+      const remoteName = endpointNames.length > 0 ? endpointNames.join(', ') : 'Remote';
+      const remoteSource: TreeNode = {
+        kind: 'source', sourceType: 'remote', name: remoteName,
+        url: [...remoteEndpoints.keys()][0],
+        namespaces: remoteNs,
+      };
+      this.nodeIndex.set('source:remote', remoteSource);
+      sources.push(remoteSource);
+    }
+
+    return sources;
   }
 
   private getNamespaceGroups(): TreeNode[] {

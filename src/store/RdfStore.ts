@@ -302,6 +302,45 @@ export class RdfStore {
     return this.sourceMap.get(iri);
   }
 
+  isLocalIri(iri: string): boolean {
+    return this.sourceMap.has(iri);
+  }
+
+  async fetchRemoteInstances(classIri: string): Promise<InstanceInfo[]> {
+    const results: InstanceInfo[] = [];
+    for (const [url] of this.remoteEndpoints) {
+      try {
+        let baseUrl = url.replace(/\/$/, '');
+        if (!baseUrl.endsWith('/query') && !baseUrl.endsWith('/sparql')) {
+          baseUrl += '/query';
+        }
+        // Discover FROM clauses
+        const fromClauses = await this.discoverGraphs(baseUrl);
+        const fromStr = fromClauses.length > 0
+          ? fromClauses.map(g => `FROM <${g}>`).join(' ') + ' '
+          : '';
+        const sparql = `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> SELECT ?inst ?label ${fromStr}WHERE { ?inst a <${classIri}> . OPTIONAL { ?inst rdfs:label ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 200`;
+        const fetchUrl = `${baseUrl}?query=${encodeURIComponent(sparql)}`;
+        const data = await this.httpGet(fetchUrl, { 'Accept': 'application/sparql-results+json' });
+        const json = JSON.parse(data);
+        for (const b of json.results?.bindings ?? []) {
+          const iri = b.inst?.value;
+          if (!iri) { continue; }
+          const label = b.label?.value ?? this.localName(iri);
+          results.push({ iri, label, types: [classIri] });
+        }
+      } catch { /* skip this endpoint */ }
+    }
+    return results;
+  }
+
+  hasLocalNamespace(ns: string): boolean {
+    for (const key of this.sourceMap.keys()) {
+      if (key.startsWith(ns)) { return true; }
+    }
+    return false;
+  }
+
   getPrefixes(): Map<string, string> {
     return new Map(this.prefixes);
   }
@@ -352,7 +391,10 @@ export class RdfStore {
     return [...grouped.values()];
   }
 
+  private graphCache = new Map<string, string[]>();
+
   private async discoverGraphs(queryUrl: string): Promise<string[]> {
+    if (this.graphCache.has(queryUrl)) { return this.graphCache.get(queryUrl)!; }
     // Step 1: check if default graph has data
     try {
       const probeUrl = `${queryUrl}?query=${encodeURIComponent('SELECT * WHERE { ?s ?p ?o } LIMIT 1')}`;
@@ -376,7 +418,7 @@ export class RdfStore {
           'urn:x-codex:graph:contributed',
           snapshot,
         ];
-        console.log(`[RDF Studio] Discovered named graphs: ${graphs.join(', ')}`);
+        this.graphCache.set(queryUrl, graphs);
         return graphs;
       }
     } catch { /* continue */ }
@@ -396,6 +438,7 @@ export class RdfStore {
       }
     } catch { /* default graph it is */ }
 
+    this.graphCache.set(queryUrl, []);
     return [];
   }
 
