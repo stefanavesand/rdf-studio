@@ -101,8 +101,22 @@ export class TurtleEditor {
 
     const subjectLine = loc.line;
     const blockEnd = this.findBlockEnd(lines, subjectLine);
-    const predCompact = this.safeCompact(predicateIri);
-    const objText = isLiteral ? `"${objectValue}"` : this.safeCompact(objectValue);
+    // Only use prefixes declared in this file
+    const filePrefixes = new Set<string>();
+    for (const line of lines) {
+      const m = line.match(/@prefix\s+(\S+):\s*<([^>]+)>/);
+      if (m) { filePrefixes.add(m[2]); }
+    }
+    const compactForFile = (iri: string): string => {
+      const compacted = this.store.compact(iri);
+      if (!compacted.includes(':')) { return `<${iri}>`; }
+      const prefix = compacted.split(':')[0];
+      const ns = this.store.getPrefixes().get(prefix);
+      if (ns && filePrefixes.has(ns)) { return compacted; }
+      return `<${iri}>`;
+    };
+    const predCompact = compactForFile(predicateIri);
+    const objText = isLiteral ? `"${objectValue}"` : compactForFile(objectValue);
 
     const lastLine = lines[blockEnd];
     const indent = this.detectIndent(lines, subjectLine, blockEnd);

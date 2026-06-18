@@ -54,7 +54,7 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
       } else if (msg.type === 'addProperty') {
         vscode.commands.executeCommand('kgExplorer.addProperty', msg.subject, msg.predicate, msg.range, msg.isObject);
       } else if (msg.type === 'editRelationship') {
-        vscode.commands.executeCommand('kgExplorer.editRelationship', msg.subject, msg.predicate, msg.oldValue, msg.oldLabel, msg.dir);
+        vscode.commands.executeCommand('kgExplorer.prepareEditRelationship', msg.subject, msg.predicate, msg.oldValue, msg.oldLabel, msg.dir);
       } else if (msg.type === 'addRelationship') {
         vscode.commands.executeCommand('kgExplorer.prepareAddRelationship', msg.subject);
       } else if (msg.type === 'editValue') {
@@ -69,6 +69,10 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
         vscode.commands.executeCommand('kgExplorer.newInstance', { kind: 'class', data: { iri: msg.classIri, label: msg.className } });
       } else if (msg.type === 'newProp') {
         vscode.commands.executeCommand('kgExplorer.newProperty', { kind: 'class', data: { iri: msg.classIri, label: msg.className } });
+      } else if (msg.type === 'commitEditRel') {
+        vscode.commands.executeCommand('kgExplorer.commitEditRelationship', msg.subject, msg.predicate, msg.oldValue, msg.newValue, msg.oldLabel);
+      } else if (msg.type === 'searchEditRel') {
+        vscode.commands.executeCommand('kgExplorer.searchForEditForm', msg.query, msg.targetType);
       } else if (msg.type === 'createProperty') {
         vscode.commands.executeCommand('kgExplorer.commitNewProperty', msg.name, msg.label, msg.kind, msg.range, msg.classIri);
       } else if (msg.type === 'createOntology') {
@@ -752,11 +756,19 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     const groups: GroupedEdge[] = [];
     for (const prop of props) {
       const items: GroupedEdge['items'] = [];
+      // Get the declared range/domain as fallback type
+      const rangeProp = direction === 'out' ? 'rdfs:range' : 'rdfs:domain';
+      const rangeRows = this.store.query(`SELECT ?r WHERE { <${prop.predicate}> ${rangeProp} ?r } LIMIT 3`);
+      const genericNames = new Set(['Resource', 'Thing', 'Class', 'Property', 'Literal']);
+      const rangeFallback = rangeRows
+        .map(r => this.store.localName(r.get('r')!.value))
+        .find(n => !genericNames.has(n)) ?? 'Resource';
+
       for (const val of prop.values) {
         if (val.isIri) {
           const isNamedIri = val.value.includes(':') || val.value.includes('/');
           const tt = isNamedIri ? this.store.getTypes(val.value) : [];
-          items.push({ iri: val.value, label: val.label, type: tt[0] ?? 'Resource' });
+          items.push({ iri: val.value, label: val.label, type: tt[0] ?? rangeFallback });
         }
       }
       if (items.length > 0) { groups.push({ relation: prop.predicate, relationLabel: prop.predicateLabel, items }); }
@@ -1190,6 +1202,25 @@ function renderForm(form) {
     c.innerHTML = newPropertyForm(form);
   } else if (form.type === 'newOntology') {
     c.innerHTML = newOntologyForm(form);
+  } else if (form.type === 'editRelationship') {
+    c.innerHTML = editRelForm(form);
+  } else if (form.type === 'editRelSearchResults') {
+    var sel = document.getElementById('er-remote-entity');
+    var resultField = document.getElementById('er-result-field');
+    var status = document.getElementById('er-status');
+    if (sel && form.results) {
+      if (form.results.length > 0) {
+        sel.innerHTML = form.results.map(function(r) { return '<option value="' + esc2(r.iri) + '">' + esc2(r.label) + '</option>'; }).join('');
+        if (resultField) resultField.style.display = '';
+        if (status) status.style.display = 'none';
+        var submit = document.getElementById('er-submit');
+        if (submit && form.results.length === 1) submit.disabled = false;
+      } else {
+        if (resultField) resultField.style.display = 'none';
+        if (status) { status.textContent = 'No matches found. Try the exact username.'; status.style.display = ''; }
+      }
+    }
+    return;
   } else if (form.type === 'addRelationship') {
     c.innerHTML = addRelForm(form);
   } else if (form.type === 'setFormValue') {
@@ -1460,6 +1491,97 @@ function foSubmit() {
   showToast('Created ontology "' + name.value + '"', false);
 }
 
+function editRelForm(form) {
+  var oldLabel = form.oldLabel || '';
+  try { oldLabel = decodeURIComponent(oldLabel); } catch(e) {}
+  var hasLocal = form.localOptions && form.localOptions.length > 0;
+  var needsSearch = form.hasRemote && !hasLocal;
+
+  var localOpts = '';
+  if (hasLocal) {
+    for (var i = 0; i < form.localOptions.length; i++) {
+      var sel = form.localOptions[i].iri === form.oldValue ? ' selected' : '';
+      localOpts += '<option value="' + esc2(form.localOptions[i].iri) + '"' + sel + '>' + esc2(form.localOptions[i].label) + '</option>';
+    }
+  }
+
+  var body = '<div class="form-field"><div class="form-label"><span class="form-label-text">Current</span></div><div style="font-size:12px;color:var(--fg-muted);padding:4px 0">' + esc2(oldLabel) + '</div></div>';
+
+  if (hasLocal) {
+    body += '<div class="form-field"><div class="form-label"><span class="form-label-text">New value</span></div><select class="form-input" id="er-entity" style="height:28px" data-oninput="erSelect">' + localOpts + '</select></div>';
+  }
+
+  if (needsSearch) {
+    body += '<div class="form-field"><div class="form-label"><span class="form-label-text">Search remote</span><span class="form-label-hint">type exact username</span></div><input class="form-input" id="er-search" placeholder="e.g. avesand" autocomplete="off" data-oninput="erSearch"></div>';
+    body += '<div class="form-field" id="er-result-field" style="display:none"><div class="form-label"><span class="form-label-text">Remote result</span></div><select class="form-input" id="er-remote-entity" style="height:28px" data-oninput="erRemoteSelect"></select></div>';
+    body += '<div id="er-status" style="font-size:11px;color:var(--fg-muted);padding:2px 0;display:none"></div>';
+  }
+
+  return '<div class="form-card">'
+    + '<div class="form-header"><span class="codicon codicon-edit" style="font-size:16px;color:var(--accent)"></span><span class="form-header-title">Edit Relationship</span><span class="codicon codicon-close" data-action="closeForm" title="Cancel" style="font-size:15px;color:var(--fg-muted);cursor:pointer"></span></div>'
+    + '<div class="form-body">' + body
+    + '<input type="hidden" id="er-subject" value="' + esc2(form.subject || '') + '">'
+    + '<input type="hidden" id="er-predicate" value="' + esc2(form.predicate || '') + '">'
+    + '<input type="hidden" id="er-oldValue" value="' + esc2(form.oldValue || '') + '">'
+    + '<input type="hidden" id="er-oldLabel" value="' + esc2(form.oldLabel || '') + '">'
+    + '<input type="hidden" id="er-targetType" value="' + esc2(form.targetType || '') + '">'
+    + '<div class="form-actions"><button class="form-btn form-btn-secondary" data-action="closeForm">Cancel</button><button class="form-btn form-btn-primary" id="er-submit" data-action="erSubmit"' + (hasLocal ? '' : ' disabled') + '>Save</button></div>'
+    + '</div></div>';
+}
+
+var erDebounce;
+var erLastQuery = '';
+function erSearch() {
+  var search = document.getElementById('er-search');
+  var targetType = document.getElementById('er-targetType');
+  var status = document.getElementById('er-status');
+  var resultField = document.getElementById('er-result-field');
+  if (!search || !targetType) return;
+  if (search.value.length < 2) {
+    if (resultField) resultField.style.display = 'none';
+    if (status) status.style.display = 'none';
+    return;
+  }
+  if (search.value === erLastQuery) return;
+  if (erDebounce) clearTimeout(erDebounce);
+  erDebounce = setTimeout(function() {
+    erLastQuery = search.value;
+    if (status) { status.textContent = 'Searching...'; status.style.display = ''; }
+    vscode.postMessage({ type: 'searchEditRel', query: search.value, targetType: targetType.value });
+  }, 500);
+}
+
+function erSelect() {
+  var submit = document.getElementById('er-submit');
+  if (submit) submit.disabled = false;
+  // Clear remote selection when local is picked
+  var remote = document.getElementById('er-remote-entity');
+  if (remote) remote.selectedIndex = -1;
+}
+
+function erRemoteSelect() {
+  var submit = document.getElementById('er-submit');
+  if (submit) submit.disabled = false;
+  // Clear local selection when remote is picked
+  var local = document.getElementById('er-entity');
+  if (local) local.selectedIndex = -1;
+}
+
+function erSubmit() {
+  var subject = document.getElementById('er-subject');
+  var predicate = document.getElementById('er-predicate');
+  var oldValue = document.getElementById('er-oldValue');
+  var oldLabel = document.getElementById('er-oldLabel');
+  // Prefer remote selection if set, otherwise local
+  var remote = document.getElementById('er-remote-entity');
+  var local = document.getElementById('er-entity');
+  var newValue = (remote && remote.value) || (local && local.value) || '';
+  if (!subject || !predicate || !oldValue || !newValue) return;
+  vscode.postMessage({ type: 'commitEditRel', subject: subject.value, predicate: predicate.value, oldValue: oldValue.value, newValue: newValue, oldLabel: oldLabel ? oldLabel.value : '' });
+  closeForm();
+  showToast('Relationship updated', false);
+}
+
 function addRelForm(form) {
   let opts = '';
   var predRanges = {};
@@ -1567,7 +1689,7 @@ function esc2(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/
 
 // event delegation for data-action buttons
 const actionHandlers = {
-  closeForm, fcSubmit, fiSubmit, foSubmit, fpSubmit, fpKindChange, edSubmit, arSubmit, arPick: arPickEntity,
+  closeForm, fcSubmit, fiSubmit, foSubmit, fpSubmit, fpKindChange, edSubmit, arSubmit, arPick: arPickEntity, erSubmit,
   editOntology: (el) => vscode.postMessage({type:'showEditForm',editType:'editOntology',iri:el.dataset.ns||'',label:el.dataset.label||'',comment:el.dataset.comment||''}),
   editClass: (el) => vscode.postMessage({type:'showEditForm',editType:'editClass',iri:el.dataset.iri||'',label:el.dataset.label||'',comment:el.dataset.comment||''}),
   editEntity: (el) => vscode.postMessage({type:'showEditForm',editType:'editEntity',iri:el.dataset.iri||'',label:el.dataset.label||'',comment:el.dataset.comment||''}),
@@ -1583,7 +1705,7 @@ document.addEventListener('click', e => {
   if (el) { const fn = actionHandlers[el.dataset.action]; if (fn) fn(el); }
 });
 // event delegation for data-oninput
-const inputHandlers = { fcUpdate, fiUpdate, foUpdate, fpUpdate, fpKindChange, arUpdate };
+const inputHandlers = { fcUpdate, fiUpdate, foUpdate, fpUpdate, fpKindChange, arUpdate, erSearch, erSelect, erRemoteSelect };
 document.addEventListener('input', e => {
   const el = e.target.closest('[data-oninput]');
   if (el) { const fn = inputHandlers[el.dataset.oninput]; if (fn) fn(); }

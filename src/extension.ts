@@ -834,16 +834,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const typeRow = store.query(`SELECT ?t WHERE { <${subject}> a ?t . ?t a owl:Class . } LIMIT 1`);
       const classIri = typeRow[0]?.get('t')?.value;
 
+      // Walk superclass chain for inherited properties
+      const superclasses: string[] = [];
+      if (classIri) {
+        const visited = new Set<string>([classIri]);
+        const queue = [classIri];
+        while (queue.length > 0) {
+          const current = queue.shift()!;
+          const parents = store.query(`SELECT ?parent WHERE { <${current}> rdfs:subClassOf ?parent . ?parent a owl:Class . FILTER(?parent != <${current}>) }`);
+          for (const r of parents) {
+            const p = r.get('parent')!.value;
+            if (!visited.has(p)) { visited.add(p); superclasses.push(p); queue.push(p); }
+          }
+        }
+      }
+      const domainFilter = [classIri, ...superclasses].filter(Boolean).map(c => `{ ?p rdfs:domain <${c}> . }`).join(' UNION ');
+
       const predRows = classIri
         ? store.query(`
             SELECT DISTINCT ?p ?pLabel WHERE {
               { ?s a <${classIri}> . ?s ?p ?o . }
               UNION
-              { ?p rdfs:domain <${classIri}> . }
+              ${domainFilter}
               FILTER(?p != rdf:type && ?p != rdfs:subClassOf && ?p != owl:imports
                      && ?p != rdfs:subPropertyOf && ?p != rdfs:domain && ?p != rdfs:range)
               OPTIONAL { ?p rdfs:label ?pLabel }
-            } ORDER BY ?pLabel LIMIT 50
+            } ORDER BY ?pLabel LIMIT 100
           `)
         : store.query(`
             SELECT DISTINCT ?p ?pLabel WHERE {
@@ -877,105 +893,67 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       relationshipsProvider.showForm({ type: 'addRelationship', subject, predicates, rangeEntities });
     }),
 
-    vscode.commands.registerCommand('kgExplorer.editRelationship', async (subject: string, predicate: string, oldValue: string, oldLabel: string, dir: string = 'out') => {
-      // For outgoing relationships, show entities matching rdfs:range
-      // For incoming relationships, show entities matching rdfs:domain
+    vscode.commands.registerCommand('kgExplorer.prepareEditRelationship', async (subject: string, predicate: string, oldValue: string, oldLabel: string, dir: string = 'out') => {
       const lookupProp = dir === 'in' ? 'rdfs:domain' : 'rdfs:range';
       const typeRows = store.query(`SELECT ?type WHERE { <${predicate}> ${lookupProp} ?type }`);
       const genericIris = new Set([
-        'http://www.w3.org/2000/01/rdf-schema#Resource',
-        'http://www.w3.org/2000/01/rdf-schema#Class',
-        'http://www.w3.org/2002/07/owl#Thing',
-        'http://www.w3.org/2002/07/owl#Class',
-        'http://www.w3.org/1999/02/22-rdf-syntax-ns#Property',
-        'http://www.w3.org/2000/01/rdf-schema#Literal',
+        'http://www.w3.org/2000/01/rdf-schema#Resource', 'http://www.w3.org/2000/01/rdf-schema#Class',
+        'http://www.w3.org/2002/07/owl#Thing', 'http://www.w3.org/2002/07/owl#Class',
+        'http://www.w3.org/1999/02/22-rdf-syntax-ns#Property', 'http://www.w3.org/2000/01/rdf-schema#Literal',
       ]);
       const stdNs = ['http://www.w3.org/2001/XMLSchema#', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
         'http://www.w3.org/2000/01/rdf-schema#', 'http://www.w3.org/2002/07/owl#'];
-      let targetType = typeRows
-        .map(r => r.get('type')!.value)
-        .find(t => !genericIris.has(t) && !stdNs.some(ns => t.startsWith(ns)));
-      // If nothing found, also check the super-property's range
+      let targetType = typeRows.map(r => r.get('type')!.value).find(t => !genericIris.has(t) && !stdNs.some(ns => t.startsWith(ns)));
       if (!targetType) {
         const superPropRows = store.query(`SELECT ?type WHERE { <${predicate}> rdfs:subPropertyOf ?sp . ?sp ${lookupProp} ?type }`);
-        targetType = superPropRows
-          .map(r => r.get('type')!.value)
-          .find(t => !genericIris.has(t) && !stdNs.some(ns => t.startsWith(ns)));
+        targetType = superPropRows.map(r => r.get('type')!.value).find(t => !genericIris.has(t) && !stdNs.some(ns => t.startsWith(ns)));
       }
-      if (!targetType) { targetType = typeRows[0]?.get('type')?.value; }
+      if (!targetType) { targetType = typeRows[0]?.get('type')?.value ?? ''; }
 
-      const entityRows = targetType
+      // Fetch local instances for the target type
+      const localRows = targetType
         ? store.query(`SELECT ?inst ?label WHERE { ?inst a <${targetType}> . OPTIONAL { ?inst rdfs:label ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 200`)
-        : store.query(`SELECT ?inst ?label WHERE { ?inst rdfs:label ?label . FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 200`);
-
-      const localItems: (vscode.QuickPickItem & { iri: string })[] = entityRows.map(r => {
+        : [];
+      const localOptions = localRows.map(r => {
         let label = r.get('label')?.value ?? store.localName(r.get('inst')!.value);
-        try { label = decodeURIComponent(label); } catch { /* */ }
-        return { label, iri: r.get('inst')!.value };
+        try { label = decodeURIComponent(label); } catch {}
+        return { iri: r.get('inst')!.value, label };
       });
 
-      const hasRemote = targetType && store.getRemoteEndpoints().size > 0;
+      relationshipsProvider.showForm({
+        type: 'editRelationship', subject, predicate, oldValue, oldLabel, targetType,
+        localOptions, hasRemote: store.getRemoteEndpoints().size > 0,
+      });
+    }),
 
-      const picked = await new Promise<{ iri: string } | undefined>(resolve => {
-        const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { iri: string }>();
-        const rangeName = targetType ? store.localName(targetType) : 'entity';
-        qp.placeholder = hasRemote
-          ? `Replace "${oldLabel}" — search ${rangeName}...`
-          : `Replace "${oldLabel}" with...`;
-        qp.items = localItems;
-        qp.matchOnDetail = true;
-
-        let debounce: ReturnType<typeof setTimeout> | undefined;
-        let lastQuery = '';
-
-        if (hasRemote) {
-          qp.onDidChangeValue(value => {
-            if (debounce) { clearTimeout(debounce); }
-            if (value.length < 2) {
-              qp.items = localItems;
-              lastQuery = '';
-              return;
-            }
-            if (value === lastQuery) { return; }
-            debounce = setTimeout(async () => {
-              lastQuery = value;
-              qp.busy = true;
-              try {
-                const remoteResults = await store.searchRemoteInstances(targetType!, value);
-                const seen = new Set(localItems.map(i => i.iri));
-                const remoteItems = remoteResults
-                  .filter(r => !seen.has(r.iri))
-                  .map(r => ({ label: r.label, detail: '$(globe) remote', iri: r.iri }));
-                const filtered = localItems.filter(i => i.label.toLowerCase().includes(value.toLowerCase()));
-                qp.items = [...filtered, ...remoteItems];
-              } catch { /* keep local */ }
-              qp.busy = false;
-            }, 300);
-          });
+    vscode.commands.registerCommand('kgExplorer.searchForEditForm', async (query: string, targetType: string) => {
+      const results: { iri: string; label: string }[] = [];
+      if (targetType) {
+        const rows = store.query(`SELECT ?inst ?label WHERE { ?inst a <${targetType}> . OPTIONAL { ?inst rdfs:label ?label } FILTER(isIRI(?inst)) FILTER(CONTAINS(LCASE(COALESCE(STR(?label), STR(?inst))), "${query.toLowerCase()}")) } LIMIT 20`);
+        for (const r of rows) {
+          let label = r.get('label')?.value ?? store.localName(r.get('inst')!.value);
+          try { label = decodeURIComponent(label); } catch {}
+          results.push({ iri: r.get('inst')!.value, label });
         }
-
-        qp.onDidAccept(() => { const sel = qp.selectedItems[0]; qp.dispose(); resolve(sel); });
-        qp.onDidHide(() => { qp.dispose(); resolve(undefined); });
-        qp.show();
-      });
-
-      if (!picked || picked.iri === oldValue) { return; }
-
-      const delOk = await editor.deleteTriple(subject, predicate, oldValue, oldLabel);
-      if (!delOk) {
-        // Try with decoded value
+      }
+      if (store.getRemoteEndpoints().size > 0 && targetType) {
         try {
-          const decoded = decodeURIComponent(oldValue);
-          if (decoded !== oldValue) {
-            await editor.deleteTriple(subject, predicate, decoded, oldLabel);
-          }
-        } catch { /* continue anyway */ }
+          const remote = await store.searchRemoteInstances(targetType, query);
+          const seen = new Set(results.map(r => r.iri));
+          for (const r of remote) { if (!seen.has(r.iri)) { results.push({ iri: r.iri, label: r.label }); } }
+        } catch {}
       }
-      const addOk = await editor.addTriple(subject, predicate, picked.iri, false);
-      if (addOk) {
-        await loadAllTtl();
-        relationshipsProvider.select(subject, false);
+      relationshipsProvider.showForm({ type: 'editRelSearchResults', results });
+    }),
+
+    vscode.commands.registerCommand('kgExplorer.commitEditRelationship', async (subject: string, predicate: string, oldValue: string, newValue: string, oldLabel: string) => {
+      let delOk = await editor.deleteTriple(subject, predicate, oldValue, oldLabel);
+      if (!delOk) {
+        try { const d = decodeURIComponent(oldValue); if (d !== oldValue) { delOk = await editor.deleteTriple(subject, predicate, d, oldLabel); } } catch {}
       }
+      const addOk = await editor.addTriple(subject, predicate, newValue, false);
+      if (addOk) { await loadAllTtl(); relationshipsProvider.select(subject, false); }
+      else { vscode.window.showWarningMessage('Failed to update relationship'); }
     }),
 
     vscode.commands.registerCommand('kgExplorer.commitAddRel', async (subject: string, predicate: string, value: string, isObject: boolean) => {
@@ -1210,10 +1188,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           });
         }
 
+        let lastActive2: (vscode.QuickPickItem & { iri: string }) | undefined;
+        qp.onDidChangeActive(items => { if (items[0]) { lastActive2 = items[0] as any; } });
         qp.onDidAccept(() => {
-          const sel = qp.selectedItems[0];
+          const sel = lastActive2 ?? qp.activeItems[0] ?? qp.selectedItems[0];
           qp.dispose();
-          resolve(sel);
+          resolve(sel as any);
         });
         qp.onDidHide(() => {
           qp.dispose();

@@ -295,7 +295,14 @@ export class RdfStore {
         OPTIONAL { ?type rdfs:label ?label }
       }
     `);
-    return rows.map(r => r.get('label')?.value ?? this.localName(r.get('type')!.value));
+    const all = rows.map(r => ({
+      label: r.get('label')?.value ?? this.localName(r.get('type')!.value),
+      iri: r.get('type')!.value,
+    }));
+    // Prefer non-generic types
+    const generic = new Set(['Resource', 'Thing', 'Class', 'Property', 'Literal']);
+    const specific = all.filter(t => !generic.has(t.label) && !RdfStore.SKIP_NS.some(ns => t.iri.startsWith(ns)));
+    return specific.length > 0 ? specific.map(t => t.label) : all.map(t => t.label);
   }
 
   getDefinitionLocation(iri: string): { uri: vscode.Uri; line: number } | undefined {
