@@ -69,6 +69,12 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
         vscode.commands.executeCommand('kgExplorer.newInstance', { kind: 'class', data: { iri: msg.classIri, label: msg.className } });
       } else if (msg.type === 'newProp') {
         vscode.commands.executeCommand('kgExplorer.newProperty', { kind: 'class', data: { iri: msg.classIri, label: msg.className } });
+      } else if (msg.type === 'addParam') {
+        vscode.commands.executeCommand('kgExplorer.prepareAddParam', msg.subject);
+      } else if (msg.type === 'commitAddParam') {
+        vscode.commands.executeCommand('kgExplorer.commitAddParam', msg.subject, msg.predicate, msg.value);
+      } else if (msg.type === 'loadRemoteEntities') {
+        vscode.commands.executeCommand('kgExplorer.loadRemoteEntities', msg.rangeIri, msg.rangeName);
       } else if (msg.type === 'commitEditRel') {
         vscode.commands.executeCommand('kgExplorer.commitEditRelationship', msg.subject, msg.predicate, msg.oldValue, msg.newValue, msg.oldLabel);
       } else if (msg.type === 'searchEditRel') {
@@ -273,9 +279,12 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
       h += `</div>`;
     }
 
-    // add relationship button (local only)
+    // action buttons (local only)
     if (!readonly) {
-      h += `<div style="padding:10px 14px 14px"><button class="add-rel-btn" data-subj="${esc(iri)}"><span class="codicon codicon-add"></span>Add relationship</button></div>`;
+      h += `<div style="padding:10px 14px 14px; display:flex; gap:8px; flex-wrap:wrap">`;
+      h += `<button class="add-rel-btn" data-action="addParam" data-subject="${esc(iri)}"><span class="codicon codicon-add"></span>Add parameter</button>`;
+      h += `<button class="add-rel-btn" data-subj="${esc(iri)}"><span class="codicon codicon-add"></span>Add relationship</button>`;
+      h += `</div>`;
     }
 
     return this.wrap(h);
@@ -711,13 +720,14 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
       default:
         content = `<span class="vb-text">${esc(display)}</span>`;
     }
-    const delAttr = predIri && this.selectedIri
-      ? ` data-del-subj="${esc(this.selectedIri)}" data-del-pred="${esc(predIri)}" data-del-obj="${esc(f.value)}"`
+    const canEditVal = !this.isRemote && predIri && this.selectedIri;
+    const valDelAttr = canEditVal
+      ? ` data-del-subj="${esc(this.selectedIri!)}" data-del-pred="${esc(predIri!)}" data-del-obj="${esc(f.value)}"`
       : '';
-    const editAttr = predIri && this.selectedIri
-      ? ` data-edit-subj="${esc(this.selectedIri)}" data-edit-pred="${esc(predIri)}" data-edit-old="${esc(f.value)}"`
+    const actions = canEditVal
+      ? `<span class="val-actions"><span class="val-edit edit-param-btn" data-ep-subj="${esc(this.selectedIri!)}" data-ep-pred="${esc(predIri!)}" data-ep-old="${esc(f.value)}" data-ep-type="${esc(f.valueType)}" title="Edit"><span class="codicon codicon-edit"></span></span><span class="val-x del-btn"${valDelAttr} title="Remove"><span class="codicon codicon-close"></span></span></span>`
       : '';
-    return `<div class="val-box edit-target"${editAttr}><div class="node-label"><span class="vb-type">${esc(f.valueType.toUpperCase())}</span><span class="val-x del-btn"${delAttr} title="Remove"><span class="codicon codicon-close"></span></span></div>${content}</div>`;
+    return `<div class="val-box"><div class="node-label"><span class="vb-type">${esc(f.valueType.toUpperCase())}</span>${actions}</div>${content}</div>`;
   }
 
   // ==================== HELPERS ====================
@@ -1008,9 +1018,11 @@ a.node-box:hover { filter:brightness(.98); }
 /* value box */
 .val-box { display:flex; flex-direction:column; gap:1px; flex:1; min-width:0; padding:6px 7px; min-height:38px; justify-content:center; border-radius:4px; background:var(--bg-value); border:1px solid var(--border-strong); }
 .vb-type { font-size:9px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--accent-param); white-space:nowrap; flex:1; min-width:0; }
-.val-x { margin-left:auto; opacity:.55; line-height:1; cursor:pointer; flex:0 0 auto; font-size:11px; margin:-2px -1px -2px 0; }
-.val-x:hover { opacity:1; }
-.val-x .codicon { font-size:11px; }
+.val-actions { margin-left:auto; display:flex; gap:3px; opacity:0; transition:opacity .15s; }
+.val-box:hover .val-actions { opacity:1; }
+.val-x, .val-edit { line-height:1; cursor:pointer; flex:0 0 auto; font-size:11px; }
+.val-x:hover, .val-edit:hover { opacity:.7; }
+.val-x .codicon, .val-edit .codicon { font-size:11px; }
 .vb-text { font-size:13px; color:var(--fg); line-height:1.25; min-width:0; }
 .vb-mono { font-family:var(--vscode-editor-font-family, monospace); font-size:12px; color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .vb-true { font-size:13px; font-weight:600; color:var(--ok); }
@@ -1146,15 +1158,40 @@ function startEdit(box) {
 }
 
 document.addEventListener('click', e => {
+  // edit parameter
+  var editParam = e.target.closest('.edit-param-btn[data-ep-subj]');
+  if (editParam) {
+    e.preventDefault(); e.stopPropagation();
+    var fc = document.getElementById('form-container');
+    if (fc) {
+      fc.style.display = 'flex';
+      var oldVal = editParam.dataset.epOld || '';
+      try { oldVal = decodeURIComponent(oldVal); } catch(ex) {}
+      fc.innerHTML = '<div class="form-card">'
+        + '<div class="form-header"><span class="codicon codicon-edit" style="font-size:16px;color:var(--accent)"></span><span class="form-header-title">Edit Parameter</span><span class="codicon codicon-close" data-action="closeForm" title="Cancel" style="font-size:15px;color:var(--fg-muted);cursor:pointer"></span></div>'
+        + '<div class="form-body">'
+        + '<div class="form-field"><div class="form-label"><span class="form-label-text">Value</span><span class="form-label-hint">' + esc2(editParam.dataset.epType || '') + '</span></div>'
+        + (editParam.dataset.epType === 'boolean'
+          ? '<select class="form-input" id="ep-value" style="height:28px"><option value="true"' + (oldVal === 'true' ? ' selected' : '') + '>true</option><option value="false"' + (oldVal === 'false' ? ' selected' : '') + '>false</option></select>'
+          : '<input class="form-input" id="ep-value" value="' + esc2(oldVal) + '">')
+        + '</div>'
+        + '<input type="hidden" id="ep-subj" value="' + esc2(editParam.dataset.epSubj || '') + '">'
+        + '<input type="hidden" id="ep-pred" value="' + esc2(editParam.dataset.epPred || '') + '">'
+        + '<input type="hidden" id="ep-old" value="' + esc2(editParam.dataset.epOld || '') + '">'
+        + '<div class="form-actions"><button class="form-btn form-btn-secondary" data-action="closeForm">Cancel</button><button class="form-btn form-btn-primary" data-action="epSubmit">Save</button></div>'
+        + '</div></div>';
+    }
+    return;
+  }
   // edit object relationship
-  const editRel = e.target.closest('.edit-rel-btn[data-edit-subj]');
+  var editRel = e.target.closest('.edit-rel-btn[data-edit-subj]');
   if (editRel) {
     e.preventDefault(); e.stopPropagation();
     vscode.postMessage({ type:'editRelationship', subject:editRel.dataset.editSubj, predicate:editRel.dataset.editPred, oldValue:editRel.dataset.editObj, oldLabel:editRel.dataset.editLabel||'', dir:editRel.dataset.editDir||'out' });
     return;
   }
   // delete
-  const del = e.target.closest('.del-btn[data-del-subj]');
+  var del = e.target.closest('.del-btn[data-del-subj]');
   if (del) {
     e.preventDefault(); e.stopPropagation();
     vscode.postMessage({ type:'delete', subject:del.dataset.delSubj, predicate:del.dataset.delPred, object:del.dataset.delObj, label:del.dataset.delLabel||'' });
@@ -1162,21 +1199,21 @@ document.addEventListener('click', e => {
     return;
   }
   // inline edit
-  const editBox = e.target.closest('.edit-target[data-edit-subj]');
+  var editBox = e.target.closest('.edit-target[data-edit-subj]');
   if (editBox && !e.target.closest('.del-btn')) { startEdit(editBox); return; }
   // add from ghost row
-  const add = e.target.closest('.add-btn[data-add-subj]');
+  var add = e.target.closest('.add-btn[data-add-subj]');
   if (add) { e.preventDefault(); vscode.postMessage({ type:'addProperty', subject:add.dataset.addSubj, predicate:add.dataset.addPred, range:add.dataset.addRange, isObject:add.dataset.addIsobj==='true' }); return; }
   // add relationship
-  const addRel = e.target.closest('.add-rel-btn[data-subj]');
+  var addRel = e.target.closest('.add-rel-btn[data-subj]');
   if (addRel) { e.preventDefault(); vscode.postMessage({ type:'addRelationship', subject:addRel.dataset.subj }); return; }
   // navigate
-  const c = e.target.closest('a[data-iri]');
-  if (c) { e.preventDefault(); vscode.postMessage({ type:'navigate', iri:c.dataset.iri }); }
+  var nav = e.target.closest('a[data-iri]');
+  if (nav) { e.preventDefault(); vscode.postMessage({ type:'navigate', iri:nav.dataset.iri }); }
 });
 document.addEventListener('contextmenu', e => {
-  const c = e.target.closest('a[data-iri]');
-  if (c) { e.preventDefault(); vscode.postMessage({ type:'goToDefinition', iri:c.dataset.iri }); }
+  var nav = e.target.closest('a[data-iri]');
+  if (nav) { e.preventDefault(); vscode.postMessage({ type:'goToDefinition', iri:nav.dataset.iri }); }
 });
 // undo from toast
 document.addEventListener('click', e => {
@@ -1205,41 +1242,66 @@ function renderForm(form) {
   } else if (form.type === 'editRelationship') {
     c.innerHTML = editRelForm(form);
   } else if (form.type === 'editRelSearchResults') {
-    var sel = document.getElementById('er-remote-entity');
-    var resultField = document.getElementById('er-result-field');
-    var status = document.getElementById('er-status');
+    var sel = document.getElementById('er-remote-entity') || document.getElementById('ar-search-entity');
+    var resultField = document.getElementById('er-result-field') || document.getElementById('ar-search-result-field');
+    var status = document.getElementById('er-status') || document.getElementById('ar-search-status');
     if (sel && form.results) {
       if (form.results.length > 0) {
         sel.innerHTML = form.results.map(function(r) { return '<option value="' + esc2(r.iri) + '">' + esc2(r.label) + '</option>'; }).join('');
         if (resultField) resultField.style.display = '';
         if (status) status.style.display = 'none';
-        var submit = document.getElementById('er-submit');
-        if (submit && form.results.length === 1) submit.disabled = false;
+        var submit = document.getElementById('er-submit') || document.getElementById('ar-submit');
+        if (submit) submit.disabled = false;
       } else {
         if (resultField) resultField.style.display = 'none';
         if (status) { status.textContent = 'No matches found. Try the exact username.'; status.style.display = ''; }
       }
     }
     return;
+  } else if (form.type === 'arRemoteEntitiesLoaded') {
+    var entityField2 = document.getElementById('ar-entity-field');
+    var entitySel2 = document.getElementById('ar-entity');
+    var entityHint2 = document.getElementById('ar-entity-hint');
+    var searchField2 = document.getElementById('ar-search-field');
+    var searchResultField2 = document.getElementById('ar-search-result-field');
+    var status2 = document.getElementById('ar-search-status');
+    var submit2 = document.getElementById('ar-submit');
+    if (entitySel2 && form.results && form.results.length > 0) {
+      entitySel2.innerHTML = form.results.map(function(r) { return '<option value="' + esc2(r.iri) + '">' + esc2(r.label) + '</option>'; }).join('');
+      if (entityField2) entityField2.style.display = '';
+      if (entityHint2) entityHint2.textContent = form.rangeName || '';
+      if (searchField2) searchField2.style.display = 'none';
+      if (searchResultField2) searchResultField2.style.display = 'none';
+      if (status2) status2.style.display = 'none';
+      if (submit2) submit2.disabled = false;
+      var isObjEl2 = document.getElementById('ar-isObject');
+      if (isObjEl2) isObjEl2.value = 'true';
+    } else {
+      if (searchField2) searchField2.style.display = '';
+      if (status2) { status2.textContent = 'No cached data. Type to search.'; status2.style.display = ''; }
+    }
+    return;
+  } else if (form.type === 'addParam') {
+    c.innerHTML = addParamForm(form);
   } else if (form.type === 'addRelationship') {
     c.innerHTML = addRelForm(form);
   } else if (form.type === 'setFormValue') {
-    const val = document.getElementById('ar-value');
-    const submit = document.getElementById('ar-submit');
-    const isObj = document.getElementById('ar-isObject');
+    var val = document.getElementById('ar-value');
+    var submit3 = document.getElementById('ar-submit');
+    var isObj = document.getElementById('ar-isObject');
     if (val) { val.value = form.value || ''; }
     if (isObj) { isObj.value = 'true'; }
-    if (submit) { submit.disabled = false; }
+    if (submit3) { submit3.disabled = false; }
     return;
   } else {
     c.innerHTML = '';
   }
-  const first = c.querySelector('input');
+  var first = c.querySelector('input');
   if (first) first.focus();
 }
 
 function closeForm() {
-  const c = document.getElementById('form-container');
+  var c = document.getElementById('form-container');
   if (c) c.innerHTML = '';
 }
 
@@ -1495,24 +1557,29 @@ function editRelForm(form) {
   var oldLabel = form.oldLabel || '';
   try { oldLabel = decodeURIComponent(oldLabel); } catch(e) {}
   var hasLocal = form.localOptions && form.localOptions.length > 0;
-  var needsSearch = form.hasRemote && !hasLocal;
+  var hasRemoteOpts = form.remoteOptions && form.remoteOptions.length > 0;
+  var allOptions = (form.localOptions || []).concat(form.remoteOptions || []);
+  var hasAny = allOptions.length > 0;
+  var needsSearch = form.hasRemote && !hasAny;
 
-  var localOpts = '';
-  if (hasLocal) {
-    for (var i = 0; i < form.localOptions.length; i++) {
-      var sel = form.localOptions[i].iri === form.oldValue ? ' selected' : '';
-      localOpts += '<option value="' + esc2(form.localOptions[i].iri) + '"' + sel + '>' + esc2(form.localOptions[i].label) + '</option>';
+  var allOpts = '';
+  if (hasAny) {
+    for (var i = 0; i < allOptions.length; i++) {
+      var sel = allOptions[i].iri === form.oldValue ? ' selected' : '';
+      allOpts += '<option value="' + esc2(allOptions[i].iri) + '"' + sel + '>' + esc2(allOptions[i].label) + '</option>';
     }
   }
 
   var body = '<div class="form-field"><div class="form-label"><span class="form-label-text">Current</span></div><div style="font-size:12px;color:var(--fg-muted);padding:4px 0">' + esc2(oldLabel) + '</div></div>';
 
-  if (hasLocal) {
-    body += '<div class="form-field"><div class="form-label"><span class="form-label-text">New value</span></div><select class="form-input" id="er-entity" style="height:28px" data-oninput="erSelect">' + localOpts + '</select></div>';
+  if (hasAny) {
+    var countHint = allOptions.length > 100 ? ' (' + allOptions.length + ' options)' : '';
+    body += '<div class="form-field"><div class="form-label"><span class="form-label-text">New value</span><span class="form-label-hint">' + esc2(countHint) + '</span></div><select class="form-input" id="er-entity" style="height:28px" data-oninput="erSelect">' + allOpts + '</select></div>';
   }
 
   if (needsSearch) {
-    body += '<div class="form-field"><div class="form-label"><span class="form-label-text">Search remote</span><span class="form-label-hint">type exact username</span></div><input class="form-input" id="er-search" placeholder="e.g. avesand" autocomplete="off" data-oninput="erSearch"></div>';
+    var rangeLabel = form.targetType ? form.targetType.split('#').pop().split('/').pop() : 'entity';
+    body += '<div class="form-field"><div class="form-label"><span class="form-label-text">Search remote</span><span class="form-label-hint">search ' + esc2(rangeLabel) + '</span></div><input class="form-input" id="er-search" placeholder="Search..." autocomplete="off" data-oninput="erSearch"></div>';
     body += '<div class="form-field" id="er-result-field" style="display:none"><div class="form-label"><span class="form-label-text">Remote result</span></div><select class="form-input" id="er-remote-entity" style="height:28px" data-oninput="erRemoteSelect"></select></div>';
     body += '<div id="er-status" style="font-size:11px;color:var(--fg-muted);padding:2px 0;display:none"></div>';
   }
@@ -1525,7 +1592,7 @@ function editRelForm(form) {
     + '<input type="hidden" id="er-oldValue" value="' + esc2(form.oldValue || '') + '">'
     + '<input type="hidden" id="er-oldLabel" value="' + esc2(form.oldLabel || '') + '">'
     + '<input type="hidden" id="er-targetType" value="' + esc2(form.targetType || '') + '">'
-    + '<div class="form-actions"><button class="form-btn form-btn-secondary" data-action="closeForm">Cancel</button><button class="form-btn form-btn-primary" id="er-submit" data-action="erSubmit"' + (hasLocal ? '' : ' disabled') + '>Save</button></div>'
+    + '<div class="form-actions"><button class="form-btn form-btn-secondary" data-action="closeForm">Cancel</button><button class="form-btn form-btn-primary" id="er-submit" data-action="erSubmit"' + (hasAny ? '' : ' disabled') + '>Save</button></div>'
     + '</div></div>';
 }
 
@@ -1549,6 +1616,50 @@ function erSearch() {
     if (status) { status.textContent = 'Searching...'; status.style.display = ''; }
     vscode.postMessage({ type: 'searchEditRel', query: search.value, targetType: targetType.value });
   }, 500);
+}
+
+function addParamForm(form) {
+  var opts = '';
+  if (form.predicates) {
+    for (var i = 0; i < form.predicates.length; i++) {
+      opts += '<option value="' + esc2(form.predicates[i].iri) + '">' + esc2(form.predicates[i].label) + '</option>';
+    }
+  }
+  return '<div class="form-card">'
+    + '<div class="form-header"><span class="codicon codicon-add" style="font-size:16px;color:var(--accent)"></span><span class="form-header-title">Add Parameter</span><span class="codicon codicon-close" data-action="closeForm" title="Cancel" style="font-size:15px;color:var(--fg-muted);cursor:pointer"></span></div>'
+    + '<div class="form-body">'
+    + '<div class="form-field"><div class="form-label"><span class="form-label-text">Property</span></div><select class="form-input" id="ap-pred" style="height:28px">' + opts + '</select></div>'
+    + '<div class="form-field"><div class="form-label"><span class="form-label-text">Value</span></div><input class="form-input" id="ap-value" placeholder="Enter value..." data-oninput="apUpdate"></div>'
+    + '<input type="hidden" id="ap-subject" value="' + esc2(form.subject || '') + '">'
+    + '<div class="form-actions"><button class="form-btn form-btn-secondary" data-action="closeForm">Cancel</button><button class="form-btn form-btn-primary" id="ap-submit" data-action="apSubmit" disabled>Add</button></div>'
+    + '</div></div>';
+}
+
+function apUpdate() {
+  var value = document.getElementById('ap-value');
+  var submit = document.getElementById('ap-submit');
+  if (value && submit) submit.disabled = !value.value;
+}
+
+function apSubmit() {
+  var subject = document.getElementById('ap-subject');
+  var pred = document.getElementById('ap-pred');
+  var value = document.getElementById('ap-value');
+  if (!subject || !pred || !value || !value.value) return;
+  vscode.postMessage({ type: 'commitAddParam', subject: subject.value, predicate: pred.value, value: value.value });
+  closeForm();
+  showToast('Parameter added', false);
+}
+
+function epSubmit() {
+  var subj = document.getElementById('ep-subj');
+  var pred = document.getElementById('ep-pred');
+  var oldVal = document.getElementById('ep-old');
+  var newVal = document.getElementById('ep-value');
+  if (!subj || !pred || !oldVal || !newVal || !newVal.value) return;
+  vscode.postMessage({ type: 'editValue', subject: subj.value, predicate: pred.value, oldValue: oldVal.value, newValue: newVal.value });
+  closeForm();
+  showToast('Parameter updated', false);
 }
 
 function erSelect() {
@@ -1608,12 +1719,16 @@ function addRelForm(form) {
     + '<div class="form-body">'
     + '<div class="form-field"><div class="form-label"><span class="form-label-text">Property</span></div><select class="form-input" id="ar-pred" style="height:28px" data-oninput="arUpdate">' + opts + '</select></div>'
     + '<div class="form-field" id="ar-value-field"><div class="form-label"><span class="form-label-text">Value</span><span class="form-label-hint" id="ar-hint"></span></div><input class="form-input" id="ar-value" placeholder="Enter value..." data-oninput="arUpdate"></div>'
-    + '<div class="form-field" id="ar-entity-field" style="display:none"><div class="form-label"><span class="form-label-text">Entity</span><span class="form-label-hint" id="ar-entity-hint"></span></div><select class="form-input" id="ar-entity" style="height:28px" data-oninput="arUpdate"></select></div>'
+    + '<div class="form-field" id="ar-entity-field" style="display:none"><div class="form-label"><span class="form-label-text">Entity</span><span class="form-label-hint" id="ar-entity-hint"></span></div><select class="form-input" id="ar-entity" style="height:28px"></select></div>'
+    + '<div class="form-field" id="ar-search-field" style="display:none"><div class="form-label"><span class="form-label-text">Search remote</span><span class="form-label-hint" id="ar-search-hint"></span></div><input class="form-input" id="ar-search" placeholder="Search..." autocomplete="off" data-oninput="arRemoteSearch"></div>'
+    + '<div class="form-field" id="ar-search-result-field" style="display:none"><div class="form-label"><span class="form-label-text">Result</span></div><select class="form-input" id="ar-search-entity" style="height:28px" data-oninput="arSearchSelect"></select></div>'
+    + '<div id="ar-search-status" style="font-size:11px;color:var(--fg-muted);padding:2px 0;display:none"></div>'
     + '<input type="hidden" id="ar-subject" value="' + esc2(form.subject || '') + '">'
     + '<input type="hidden" id="ar-isObject" value="false">'
     + '<input type="hidden" id="ar-range" value="">'
     + '<input type="hidden" id="ar-entity-opts" value="' + esc2(JSON.stringify(entityOptsMap)) + '">'
     + '<input type="hidden" id="ar-pred-ranges" value="' + esc2(JSON.stringify(predRanges)) + '">'
+    + '<input type="hidden" id="ar-has-remote" value="' + (form.hasRemote ? 'true' : 'false') + '">'
     + '<div class="form-actions"><button class="form-btn form-btn-secondary" data-action="closeForm">Cancel</button><button class="form-btn form-btn-primary" id="ar-submit" data-action="arSubmit" disabled>Add</button></div>'
     + '</div></div>';
 }
@@ -1651,12 +1766,31 @@ function arUpdate() {
     if (rangeEl) rangeEl.value = rangeName;
     submit.disabled = !entitySel.value;
   } else {
-    if (valueField) valueField.style.display = '';
-    if (entityField) entityField.style.display = 'none';
-    if (hint) hint.textContent = rangeName ? 'Expected: ' + rangeName : '';
-    if (isObjEl) isObjEl.value = hasArrow ? 'true' : 'false';
-    if (rangeEl) rangeEl.value = rangeName;
-    submit.disabled = !(value && value.value);
+    var searchField = document.getElementById('ar-search-field');
+    var searchResultField = document.getElementById('ar-search-result-field');
+    var hasRemoteEl = document.getElementById('ar-has-remote');
+    var hasRemote = hasRemoteEl && hasRemoteEl.value === 'true';
+    if (hasArrow && hasRemote && !hasEntities) {
+      if (valueField) valueField.style.display = 'none';
+      if (entityField) entityField.style.display = 'none';
+      if (searchField) searchField.style.display = 'none';
+      if (searchResultField) searchResultField.style.display = 'none';
+      if (isObjEl) isObjEl.value = 'true';
+      if (rangeEl) rangeEl.value = rangeIri;
+      submit.disabled = true;
+      var status = document.getElementById('ar-search-status');
+      if (status) { status.textContent = 'Loading ' + rangeName + '...'; status.style.display = ''; }
+      vscode.postMessage({ type: 'loadRemoteEntities', rangeIri: rangeIri, rangeName: rangeName });
+    } else {
+      if (valueField) valueField.style.display = '';
+      if (entityField) entityField.style.display = 'none';
+      if (searchField) searchField.style.display = 'none';
+      if (searchResultField) searchResultField.style.display = 'none';
+      if (hint) hint.textContent = rangeName ? 'Expected: ' + rangeName : '';
+      if (isObjEl) isObjEl.value = hasArrow ? 'true' : 'false';
+      if (rangeEl) rangeEl.value = rangeName;
+      submit.disabled = !(value && value.value);
+    }
   }
 }
 
@@ -1668,19 +1802,49 @@ function arSubmit() {
   var subject = document.getElementById('ar-subject');
   var isObj = document.getElementById('ar-isObject');
   if (!pred || !subject) return;
+  var searchEntity = document.getElementById('ar-search-entity');
   var useEntity = entityField && entityField.style.display !== 'none' && entitySel && entitySel.value;
-  var val = useEntity ? entitySel.value : (value ? value.value : '');
+  var useSearch = searchEntity && searchEntity.value;
+  var val = useSearch ? searchEntity.value : (useEntity ? entitySel.value : (value ? value.value : ''));
   if (!val) return;
-  var isObject = useEntity || (isObj && isObj.value === 'true');
+  var isObject = useSearch || useEntity || (isObj && isObj.value === 'true');
   vscode.postMessage({ type: 'commitAddRel', subject: subject.value, predicate: pred.value, value: val, isObject: isObject });
   closeForm();
   showToast('Relationship added', false);
 }
 
+var arSearchDebounce;
+var arSearchLastQuery = '';
+function arRemoteSearch() {
+  var search = document.getElementById('ar-search');
+  var rangeEl = document.getElementById('ar-range');
+  var status = document.getElementById('ar-search-status');
+  var resultField = document.getElementById('ar-search-result-field');
+  if (!search || !rangeEl) return;
+  if (search.value.length < 2) {
+    if (resultField) resultField.style.display = 'none';
+    if (status) status.style.display = 'none';
+    return;
+  }
+  if (search.value === arSearchLastQuery) return;
+  if (arSearchDebounce) clearTimeout(arSearchDebounce);
+  arSearchDebounce = setTimeout(function() {
+    arSearchLastQuery = search.value;
+    if (status) { status.textContent = 'Searching...'; status.style.display = ''; }
+    vscode.postMessage({ type: 'searchEditRel', query: search.value, targetType: rangeEl.value });
+  }, 500);
+}
+
+function arSearchSelect() {
+  var entity = document.getElementById('ar-search-entity');
+  var submit = document.getElementById('ar-submit');
+  if (entity && entity.value && submit) submit.disabled = false;
+}
+
 function arPickEntity() {
-  const pred = document.getElementById('ar-pred');
-  const subject = document.getElementById('ar-subject');
-  const rangeEl = document.getElementById('ar-range');
+  var pred = document.getElementById('ar-pred');
+  var subject = document.getElementById('ar-subject');
+  var rangeEl = document.getElementById('ar-range');
   if (!pred || !subject) return;
   vscode.postMessage({ type: 'pickEntity', subject: subject.value, predicate: pred.value, range: rangeEl ? rangeEl.value : '' });
 }
@@ -1688,8 +1852,9 @@ function arPickEntity() {
 function esc2(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // event delegation for data-action buttons
-const actionHandlers = {
-  closeForm, fcSubmit, fiSubmit, foSubmit, fpSubmit, fpKindChange, edSubmit, arSubmit, arPick: arPickEntity, erSubmit,
+var actionHandlers = {
+  closeForm, fcSubmit, fiSubmit, foSubmit, fpSubmit, fpKindChange, edSubmit, arSubmit, arPick: arPickEntity, erSubmit, epSubmit, apSubmit,
+  addParam: function(el) { vscode.postMessage({type:'addParam', subject:el.dataset.subject||''}); },
   editOntology: (el) => vscode.postMessage({type:'showEditForm',editType:'editOntology',iri:el.dataset.ns||'',label:el.dataset.label||'',comment:el.dataset.comment||''}),
   editClass: (el) => vscode.postMessage({type:'showEditForm',editType:'editClass',iri:el.dataset.iri||'',label:el.dataset.label||'',comment:el.dataset.comment||''}),
   editEntity: (el) => vscode.postMessage({type:'showEditForm',editType:'editEntity',iri:el.dataset.iri||'',label:el.dataset.label||'',comment:el.dataset.comment||''}),
@@ -1700,15 +1865,15 @@ const actionHandlers = {
   addImport: (el) => vscode.postMessage({type:'addImport',ns:el.dataset.ns||''}),
   removeImport: (el) => vscode.postMessage({type:'removeImport',ns:el.dataset.ns||'',import:el.dataset.import||''})
 };
-document.addEventListener('click', e => {
-  const el = e.target.closest('[data-action]');
-  if (el) { const fn = actionHandlers[el.dataset.action]; if (fn) fn(el); }
+document.addEventListener('click', function(e) {
+  var el = e.target.closest('[data-action]');
+  if (el) { var fn = actionHandlers[el.dataset.action]; if (fn) fn(el); }
 });
 // event delegation for data-oninput
-const inputHandlers = { fcUpdate, fiUpdate, foUpdate, fpUpdate, fpKindChange, arUpdate, erSearch, erSelect, erRemoteSelect };
-document.addEventListener('input', e => {
-  const el = e.target.closest('[data-oninput]');
-  if (el) { const fn = inputHandlers[el.dataset.oninput]; if (fn) fn(); }
+var inputHandlers = { fcUpdate, fiUpdate, foUpdate, fpUpdate, fpKindChange, arUpdate, arRemoteSearch, arSearchSelect, erSearch, erSelect, erRemoteSelect, apUpdate };
+document.addEventListener('input', function(e) {
+  var el = e.target.closest('[data-oninput]');
+  if (el) { var fn = inputHandlers[el.dataset.oninput]; if (fn) fn(); }
 });
 </script>
 </body></html>`;

@@ -386,6 +386,16 @@ export class RdfStore {
     return [];
   }
 
+  async getRemoteInstances(classIri: string): Promise<InstanceInfo[]> {
+    const cached = this.remoteInstanceCache.get(classIri);
+    if (cached && Date.now() - cached.timestamp < RdfStore.INSTANCE_CACHE_TTL) {
+      return cached.data;
+    }
+    const data = await this.fetchRemoteInstances(classIri);
+    this.remoteInstanceCache.set(classIri, { data, timestamp: Date.now() });
+    return data;
+  }
+
   async fetchRemoteInstances(classIri: string): Promise<InstanceInfo[]> {
     const results: InstanceInfo[] = [];
     for (const [url] of this.remoteEndpoints) {
@@ -398,7 +408,7 @@ export class RdfStore {
         const fromStr = fromClauses.length > 0
           ? fromClauses.map(g => `FROM <${g}>`).join(' ') + ' '
           : '';
-        const sparql = `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> SELECT ?inst ?label ${fromStr}WHERE { ?inst a <${classIri}> . OPTIONAL { ?inst rdfs:label ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 200`;
+        const sparql = `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX foaf: <http://xmlns.com/foaf/0.1/> SELECT ?inst ?label ${fromStr}WHERE { ?inst a <${classIri}> . OPTIONAL { ?inst rdfs:label ?label } OPTIONAL { ?inst foaf:name ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 15000`;
         const fetchUrl = `${baseUrl}?query=${encodeURIComponent(sparql)}`;
         const data = await this.httpGet(fetchUrl, { 'Accept': 'application/sparql-results+json' });
         const json = JSON.parse(data);
@@ -502,6 +512,8 @@ export class RdfStore {
   }
 
   private graphCache = new Map<string, string[]>();
+  private remoteInstanceCache = new Map<string, { data: InstanceInfo[]; timestamp: number }>();
+  private static readonly INSTANCE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
   private async discoverGraphs(queryUrl: string): Promise<string[]> {
     if (this.graphCache.has(queryUrl)) { return this.graphCache.get(queryUrl)!; }

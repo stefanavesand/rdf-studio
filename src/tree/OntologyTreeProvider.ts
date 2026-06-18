@@ -164,14 +164,11 @@ export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         }
       } else {
         try {
-          const remoteInstances = await this.store.fetchRemoteInstances(node.data.iri);
+          const remoteInstances = await this.store.getRemoteInstances(node.data.iri);
           for (const inst of remoteInstances) {
             const n: TreeNode = { kind: 'instance', data: inst, parentIri: node.data.iri, sourceType: 'remote' };
             this.nodeIndex.set(`remote:${inst.iri}`, n);
             children.push(n);
-          }
-          if (remoteInstances.length >= 200) {
-            children.push({ kind: 'instance', data: { iri: '', label: '⋯ showing first 200 of more results', types: [] }, parentIri: node.data.iri, sourceType: 'remote' });
           }
         } catch { /* silent */ }
       }

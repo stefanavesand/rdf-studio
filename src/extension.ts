@@ -890,7 +890,56 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const rangeEntities: Record<string, {iri: string, label: string}[]> = {};
       for (const [k, v] of rangeEntitiesCache) { rangeEntities[k] = v; }
 
-      relationshipsProvider.showForm({ type: 'addRelationship', subject, predicates, rangeEntities });
+      relationshipsProvider.showForm({ type: 'addRelationship', subject, predicates, rangeEntities, hasRemote: store.getRemoteEndpoints().size > 0 });
+    }),
+
+    vscode.commands.registerCommand('kgExplorer.prepareAddParam', async (subject: string) => {
+      const typeRow = store.query(`SELECT ?t WHERE { <${subject}> a ?t . ?t a owl:Class . } LIMIT 1`);
+      const classIri = typeRow[0]?.get('t')?.value;
+
+      const allClasses: string[] = classIri ? [classIri] : [];
+      if (classIri) {
+        const visited = new Set<string>([classIri]);
+        const queue = [classIri];
+        while (queue.length > 0) {
+          const current = queue.shift()!;
+          const parents = store.query(`SELECT ?parent WHERE { <${current}> rdfs:subClassOf ?parent . ?parent a owl:Class . FILTER(?parent != <${current}>) }`);
+          for (const r of parents) {
+            const p = r.get('parent')!.value;
+            if (!visited.has(p)) { visited.add(p); allClasses.push(p); queue.push(p); }
+          }
+        }
+      }
+
+      const domainFilter = allClasses.map(c => `{ ?p rdfs:domain <${c}> . }`).join(' UNION ');
+      const predRows = store.query(`
+        SELECT DISTINCT ?p ?pLabel WHERE {
+          ?p a owl:DatatypeProperty .
+          ${domainFilter || '{ ?p rdfs:domain ?any }'}
+          OPTIONAL { ?p rdfs:label ?pLabel }
+        } ORDER BY ?pLabel LIMIT 50
+      `);
+
+      const predicates = predRows.map(r => ({
+        iri: r.get('p')!.value,
+        label: r.get('pLabel')?.value ?? store.localName(r.get('p')!.value),
+      }));
+
+      relationshipsProvider.showForm({ type: 'addParam', subject, predicates });
+    }),
+
+    vscode.commands.registerCommand('kgExplorer.commitAddParam', async (subject: string, predicate: string, value: string) => {
+      const ok = await editor.addTriple(subject, predicate, value, true);
+      if (ok) { await loadAllTtl(); relationshipsProvider.select(subject, false); }
+    }),
+
+    vscode.commands.registerCommand('kgExplorer.loadRemoteEntities', async (rangeIri: string, rangeName: string) => {
+      try {
+        const results = await store.getRemoteInstances(rangeIri);
+        relationshipsProvider.showForm({ type: 'arRemoteEntitiesLoaded', results: results.map(r => ({ iri: r.iri, label: r.label })), rangeName });
+      } catch {
+        relationshipsProvider.showForm({ type: 'arRemoteEntitiesLoaded', results: [], rangeName });
+      }
     }),
 
     vscode.commands.registerCommand('kgExplorer.prepareEditRelationship', async (subject: string, predicate: string, oldValue: string, oldLabel: string, dir: string = 'out') => {
@@ -910,19 +959,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       if (!targetType) { targetType = typeRows[0]?.get('type')?.value ?? ''; }
 
-      // Fetch local instances for the target type
-      const localRows = targetType
-        ? store.query(`SELECT ?inst ?label WHERE { ?inst a <${targetType}> . OPTIONAL { ?inst rdfs:label ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 200`)
-        : [];
+      // Fetch local instances — include subclass instances
+      let localRows: ReturnType<typeof store.query> = [];
+      if (targetType) {
+        const subclasses = store.query(`SELECT ?sub WHERE { ?sub rdfs:subClassOf <${targetType}> . ?sub a owl:Class . FILTER(?sub != <${targetType}>) }`);
+        const types = [targetType, ...subclasses.map(r => r.get('sub')!.value)];
+        const typeUnion = types.map(t => `{ ?inst a <${t}> }`).join(' UNION ');
+        localRows = store.query(`SELECT ?inst ?label WHERE { ${typeUnion} . OPTIONAL { ?inst rdfs:label ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 500`);
+      }
       const localOptions = localRows.map(r => {
         let label = r.get('label')?.value ?? store.localName(r.get('inst')!.value);
         try { label = decodeURIComponent(label); } catch {}
         return { iri: r.get('inst')!.value, label };
       });
 
+      // Also fetch remote instances if no local ones
+      let remoteOptions: { iri: string; label: string }[] = [];
+      if (localOptions.length === 0 && store.getRemoteEndpoints().size > 0 && targetType) {
+        try {
+          remoteOptions = await store.getRemoteInstances(targetType);
+        } catch {}
+      }
+
       relationshipsProvider.showForm({
         type: 'editRelationship', subject, predicate, oldValue, oldLabel, targetType,
-        localOptions, hasRemote: store.getRemoteEndpoints().size > 0,
+        localOptions, remoteOptions, hasRemote: store.getRemoteEndpoints().size > 0,
       });
     }),
 
