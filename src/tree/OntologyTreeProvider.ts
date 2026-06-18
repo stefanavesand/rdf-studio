@@ -6,7 +6,7 @@ export type TreeNode =
   | { kind: 'source'; sourceType: 'local' | 'remote'; name: string; url?: string; namespaces: TreeNode[] }
   | { kind: 'namespace'; ns: string; label: string; prefix: string; classes: ClassInfo[]; sourceType?: 'local' | 'remote' }
   | { kind: 'class'; data: ClassInfo; parentIri?: string; sourceType?: 'local' | 'remote' }
-  | { kind: 'instance'; data: InstanceInfo; parentIri: string };
+  | { kind: 'instance'; data: InstanceInfo; parentIri: string; sourceType?: 'local' | 'remote' };
 
 export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined>();
@@ -93,7 +93,7 @@ export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         const themeColor = hueToThemeColor(hueFor(node.data.label));
         item.iconPath = new vscode.ThemeIcon('symbol-class', new vscode.ThemeColor(themeColor));
         item.tooltip = `${node.data.label}${isRemote ? ' (remote)' : ` (${node.data.instanceCount} instances)`}\n${this.store.compact(node.data.iri)}`;
-        item.contextValue = 'class';
+        item.contextValue = isRemote ? 'remoteClass' : 'class';
         item.id = `${node.sourceType ?? 'local'}:${node.data.iri}`;
         item.command = {
           command: 'kgExplorer.showProperties',
@@ -107,13 +107,13 @@ export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         const parentClass = node.parentIri ? this.store.localName(node.parentIri) : '';
         const themeColor = hueToThemeColor(hueFor(parentClass));
         item.iconPath = new vscode.ThemeIcon('symbol-field', new vscode.ThemeColor(themeColor));
-        item.tooltip = this.store.compact(node.data.iri);
-        item.contextValue = 'instance';
-        item.id = node.data.iri;
+        item.tooltip = node.sourceType === 'remote' ? `${node.data.iri} (remote)` : this.store.compact(node.data.iri);
+        item.contextValue = node.sourceType === 'remote' ? 'remoteInstance' : 'instance';
+        item.id = `${node.sourceType ?? 'local'}:${node.data.iri}`;
         item.command = {
           command: 'kgExplorer.showProperties',
           title: 'Show Properties',
-          arguments: [node.data.iri],
+          arguments: [node],
         };
         return item;
       }
@@ -146,6 +146,10 @@ export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       const children: TreeNode[] = [];
 
       for (const sub of node.data.subClasses) {
+        // Filter subclasses by source: only show subclasses that belong to this source
+        const subIsLocal = this.store.hasLocalNamespace(this.extractNamespace(sub.iri));
+        if (src === 'local' && !subIsLocal) { continue; }
+        if (src === 'remote' && subIsLocal) { continue; }
         const id = `${src}:${sub.iri}`;
         const n: TreeNode = { kind: 'class', data: sub, parentIri: node.data.iri, sourceType: src };
         this.nodeIndex.set(id, n);
@@ -153,23 +157,21 @@ export class OntologyTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       }
 
       if (src === 'local') {
-        // Local source: only show local instances
         for (const inst of this.store.getInstances(node.data.iri)) {
-          const n: TreeNode = { kind: 'instance', data: inst, parentIri: node.data.iri };
+          const n: TreeNode = { kind: 'instance', data: inst, parentIri: node.data.iri, sourceType: 'local' };
           this.nodeIndex.set(inst.iri, n);
           children.push(n);
         }
       } else {
-        // Remote source: fetch instances on-demand from remote endpoint
         try {
           const remoteInstances = await this.store.fetchRemoteInstances(node.data.iri);
           for (const inst of remoteInstances) {
-            const n: TreeNode = { kind: 'instance', data: inst, parentIri: node.data.iri };
-            this.nodeIndex.set(inst.iri, n);
+            const n: TreeNode = { kind: 'instance', data: inst, parentIri: node.data.iri, sourceType: 'remote' };
+            this.nodeIndex.set(`remote:${inst.iri}`, n);
             children.push(n);
           }
           if (remoteInstances.length >= 200) {
-            children.push({ kind: 'instance', data: { iri: '', label: '⋯ showing first 200 of more results', types: [] }, parentIri: node.data.iri });
+            children.push({ kind: 'instance', data: { iri: '', label: '⋯ showing first 200 of more results', types: [] }, parentIri: node.data.iri, sourceType: 'remote' });
           }
         } catch { /* silent */ }
       }

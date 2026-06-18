@@ -74,11 +74,28 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
       } else if (msg.type === 'createOntology') {
         vscode.commands.executeCommand('kgExplorer.commitNewOntology', msg.name, msg.prefix, msg.ns, msg.desc, msg.file);
       } else if (msg.type === 'createClass') {
-        vscode.commands.executeCommand('kgExplorer.commitNewClass', msg.name, msg.label, msg.comment, msg.ns);
+        vscode.commands.executeCommand('kgExplorer.commitNewClass', msg.name, msg.label, msg.comment, msg.ns, msg.superclass);
       } else if (msg.type === 'createInstance') {
         vscode.commands.executeCommand('kgExplorer.commitNewInstance', msg.localName, msg.label, msg.classIri);
       } else if (msg.type === 'newClass') {
-        this.showForm({ type: 'newClass', ns: msg.ns });
+        // Fetch classes for superclass picker
+        const classRows = this.store.query(`
+          SELECT DISTINCT ?cls ?label WHERE {
+            ?cls a owl:Class .
+            OPTIONAL { ?cls rdfs:label ?label }
+          } ORDER BY ?label LIMIT 200
+        `);
+        const seen = new Set<string>();
+        const classes = classRows
+          .filter(r => { const i = r.get('cls')!.value; if (seen.has(i)) { return false; } seen.add(i); return !i.startsWith('http://www.w3.org/'); })
+          .map(r => {
+            const iri = r.get('cls')!.value;
+            const label = r.get('label')?.value ?? this.store.localName(iri);
+            const compact = this.store.compact(iri);
+            const prefix = compact.includes(':') ? compact.split(':')[0] + ':' : '';
+            return { iri, label: prefix ? `${label} (${prefix})` : label };
+          });
+        this.showForm({ type: 'newClass', ns: msg.ns, classes });
       } else if (msg.type === 'newProperty') {
         vscode.commands.executeCommand('kgExplorer.newProperty', msg.ns);
       } else if (msg.type === 'addImport') {
@@ -98,9 +115,31 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     this.refresh();
   }
 
-  select(iri: string, isClass = false): void {
+  private isRemote = false;
+
+  select(iri: string, isClass = false, remote = false): void {
     this.selectedIri = iri;
     this.selectedMode = isClass ? 'class' : 'instance';
+    this.isRemote = remote;
+    this.refresh();
+  }
+
+  async selectRemote(iri: string, endpointUrl: string): Promise<void> {
+    this.selectedIri = iri;
+    this.selectedMode = 'instance';
+    this.isRemote = true;
+    // Show loading state
+    if (this.view) {
+      try {
+        let label = this.store.getLabel(iri) ?? this.store.localName(iri);
+        try { label = decodeURIComponent(label); } catch { /* */ }
+        this.view.webview.html = this.wrap(`<div style="padding:20px 14px;text-align:center;color:var(--fg-muted)"><span class="codicon codicon-loading codicon-modifier-spin" style="font-size:24px"></span><p style="margin-top:12px">Loading ${esc(label)}...</p></div>`);
+      } catch { /* */ }
+    }
+    // Fetch triples about this entity from the remote endpoint
+    try {
+      await this.store.fetchRemoteEntity(iri, endpointUrl);
+    } catch { /* render with whatever we have */ }
     this.refresh();
   }
 
@@ -140,7 +179,8 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     }
 
     const iri = this.selectedIri;
-    const label = this.store.getLabel(iri) ?? this.store.localName(iri);
+    let label = this.store.getLabel(iri) ?? this.store.localName(iri);
+    try { label = decodeURIComponent(label); } catch { /* */ }
     const types = this.store.getTypes(iri);
     const focusType = types[0] ?? 'Resource';
     const focusHue = hueFor(focusType);
@@ -154,15 +194,18 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     const validation: import('./store/SchemaService').ValidationResult = { violations: [], warnings: [] };
     const issueCount = 0;
 
+    const readonly = this.isRemote;
     let h = '';
 
     // breadcrumb
     h += `<div class="crumb-strip">`;
-    h += `<span class="crumb-kind">INSTANCE</span>`;
+    h += `<span class="crumb-kind">${readonly ? 'REMOTE' : 'INSTANCE'}</span>`;
     h += `<a class="crumb-pill" style="--h:${focusHue}" data-iri="${esc(iri)}"><span class="crumb-dot" style="--h:${focusHue}"></span><span class="crumb-name" style="--h:${focusHue}">${esc(label)}</span></a>`;
     h += `<span class="codicon codicon-chevron-right" style="font-size:13px;color:var(--fg-muted)"></span>`;
     h += `<span class="crumb-parent">${esc(focusType)}</span>`;
-    h += `<span style="margin-left:auto" class="crumb-edit codicon codicon-edit" data-action="editEntity" data-iri="${esc(iri)}" data-label="${esc(label)}" data-comment="${esc(this.store.getComment(iri) ?? '')}" title="Edit entity"></span>`;
+    if (!readonly) {
+      h += `<span style="margin-left:auto" class="crumb-edit codicon codicon-edit" data-action="editEntity" data-iri="${esc(iri)}" data-label="${esc(label)}" data-comment="${esc(this.store.getComment(iri) ?? '')}" title="Edit entity"></span>`;
+    }
     h += `</div>`;
 
     // validation banner
@@ -226,8 +269,10 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
       h += `</div>`;
     }
 
-    // add relationship button
-    h += `<div style="padding:10px 14px 14px"><button class="add-rel-btn" data-subj="${esc(iri)}"><span class="codicon codicon-add"></span>Add relationship</button></div>`;
+    // add relationship button (local only)
+    if (!readonly) {
+      h += `<div style="padding:10px 14px 14px"><button class="add-rel-btn" data-subj="${esc(iri)}"><span class="codicon codicon-add"></span>Add relationship</button></div>`;
+    }
 
     return this.wrap(h);
   }
@@ -319,11 +364,27 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     const countRows = this.store.query(`SELECT (COUNT(DISTINCT ?i) AS ?n) WHERE { ?i a <${classIri}> . FILTER(isIRI(?i)) }`);
     const instCount = parseInt(countRows[0]?.get('n')?.value ?? '0', 10);
 
-    // cheap: superclass
-    const superRows = this.store.query(`SELECT ?parent ?label WHERE { <${classIri}> rdfs:subClassOf ?parent . ?parent a owl:Class . OPTIONAL { ?parent rdfs:label ?label } } LIMIT 1`);
-    const superclass = superRows[0] ? (superRows[0].get('label')?.value ?? this.store.localName(superRows[0].get('parent')!.value)) : undefined;
+    // Walk the full superclass chain for inherited properties
+    const superclassIris: string[] = [];
+    const visited = new Set<string>([classIri]);
+    const queue = [classIri];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const parents = this.store.query(`SELECT ?parent WHERE { <${current}> rdfs:subClassOf ?parent . ?parent a owl:Class . FILTER(?parent != <${current}>) }`);
+      for (const r of parents) {
+        const p = r.get('parent')!.value;
+        if (!visited.has(p)) {
+          visited.add(p);
+          superclassIris.push(p);
+          queue.push(p);
+        }
+      }
+    }
+    // Direct superclass for display
+    const directSuperRows = this.store.query(`SELECT ?parent ?label WHERE { <${classIri}> rdfs:subClassOf ?parent . ?parent a owl:Class . FILTER(?parent != <${classIri}>) OPTIONAL { ?parent rdfs:label ?label } } LIMIT 1`);
+    const superclass = directSuperRows[0] ? (directSuperRows[0].get('label')?.value ?? this.store.localName(directSuperRows[0].get('parent')!.value)) : undefined;
 
-    // cheap: properties with domain = this class (scoped, not all properties)
+    // properties with domain = this class (direct)
     const propRows = this.store.query(`
       SELECT DISTINCT ?p ?pLabel ?range ?rangeLabel ?propType WHERE {
         ?p rdfs:domain <${classIri}> .
@@ -334,6 +395,29 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
                    OPTIONAL { ?range rdfs:label ?rangeLabel } }
       } ORDER BY ?pLabel
     `);
+
+    // inherited properties from superclasses
+    const directPropIris = new Set(propRows.map(r => r.get('p')!.value));
+    const inheritedRows: typeof propRows = [];
+    for (const superIri of superclassIris) {
+      const superProps = this.store.query(`
+        SELECT DISTINCT ?p ?pLabel ?range ?rangeLabel ?propType WHERE {
+          ?p rdfs:domain <${superIri}> .
+          ?p a ?propType .
+          FILTER(?propType IN (owl:ObjectProperty, owl:DatatypeProperty))
+          OPTIONAL { ?p rdfs:label ?pLabel }
+          OPTIONAL { ?p rdfs:range ?range .
+                     OPTIONAL { ?range rdfs:label ?rangeLabel } }
+        } ORDER BY ?pLabel
+      `);
+      for (const r of superProps) {
+        const pIri = r.get('p')!.value;
+        if (!directPropIris.has(pIri)) {
+          directPropIris.add(pIri);
+          inheritedRows.push(r);
+        }
+      }
+    }
 
     // cheap: properties actually used by instances of this class
     const usedRows = this.store.query(`
@@ -347,20 +431,33 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     const declaredProps = new Set(propRows.map(r => r.get('p')!.value));
     const usedOnlyProps = usedRows.filter(r => !declaredProps.has(r.get('p')!.value));
 
+    const readonly = this.isRemote;
     let h = '';
 
     // breadcrumb
     h += `<div class="crumb-strip">`;
-    h += `<span class="crumb-kind">CLASS</span>`;
+    h += `<span class="crumb-kind">${readonly ? 'REMOTE CLASS' : 'CLASS'}</span>`;
     h += `<span class="crumb-pill" style="--h:${classHue}"><span class="crumb-dot" style="--h:${classHue}"></span><span class="crumb-name" style="--h:${classHue}">${esc(classLabel)}</span></span>`;
-    h += `<span class="codicon codicon-chevron-right" style="font-size:13px;color:var(--fg-muted)"></span>`;
-    h += `<span class="crumb-parent">OWL:CLASS</span>`;
-    h += `<span style="margin-left:auto" class="crumb-edit codicon codicon-edit" data-action="editClass" data-iri="${esc(classIri)}" data-label="${esc(classLabel)}" data-comment="${esc(comment ?? '')}" title="Edit class"></span>`;
+    if (superclass) {
+      const superIri = directSuperRows[0]!.get('parent')!.value;
+      const superHue = hueFor(superclass);
+      h += `<span class="codicon codicon-chevron-right" style="font-size:13px;color:var(--fg-muted)"></span>`;
+      h += `<a class="crumb-pill" style="--h:${superHue};cursor:pointer" data-iri="${esc(superIri)}" title="Superclass"><span class="crumb-dot" style="--h:${superHue}"></span><span class="crumb-name" style="--h:${superHue}">${esc(superclass)}</span></a>`;
+    } else {
+      h += `<span class="codicon codicon-chevron-right" style="font-size:13px;color:var(--fg-muted)"></span>`;
+      h += `<span class="crumb-parent">owl:Class</span>`;
+    }
+    if (!readonly) {
+      h += `<span style="margin-left:auto" class="crumb-edit codicon codicon-edit" data-action="editClass" data-iri="${esc(classIri)}" data-label="${esc(classLabel)}" data-comment="${esc(comment ?? '')}" title="Edit class"></span>`;
+    }
     h += `</div>`;
 
     // class info
+    if (superclass) {
+      h += `<div style="padding:6px 14px 2px;font-size:11px;color:var(--fg-muted)">Subclass of <strong>${esc(superclass)}</strong></div>`;
+    }
     if (comment) {
-      h += `<div style="padding:8px 14px 4px 14px;font-size:12.5px;color:var(--fg-muted);line-height:1.55">${esc(comment)}</div>`;
+      h += `<div style="padding:${superclass ? '2px' : '8px'} 14px 4px 14px;font-size:12.5px;color:var(--fg-muted);line-height:1.55">${esc(comment)}</div>`;
     }
 
     // column headers
@@ -389,22 +486,45 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
       h += `</div>`;
     }
 
-    // action buttons
-    h += `<div style="padding:10px 14px 14px; display:flex; gap:8px">`;
-    h += `<button class="add-rel-btn" data-action="newProp" data-class-iri="${esc(classIri)}" data-class-name="${esc(classLabel)}"><span class="codicon codicon-add"></span>Add property</button>`;
-    h += `<button class="add-rel-btn" data-action="newInst" data-class-iri="${esc(classIri)}" data-class-name="${esc(classLabel)}"><span class="codicon codicon-add"></span>New instance</button>`;
-    h += `</div>`;
+    // inherited properties (from superclasses)
+    if (inheritedRows.length > 0) {
+      const inhData = inheritedRows.filter(r => r.get('propType')!.value.includes('DatatypeProperty'));
+      const inhObj = inheritedRows.filter(r => r.get('propType')!.value.includes('ObjectProperty'));
+      const ancestorNames = superclassIris.slice(0, 3).map(s => this.store.getLabel(s) ?? this.store.localName(s)).join(', ');
+      if (inhData.length > 0) {
+        h += `<div class="tbl" style="margin-bottom:8px">`;
+        h += this.divider('param', `Inherited datatype properties`, `from ${ancestorNames}`, inhData.length);
+        for (const p of inhData) { h += this.schemaPropertyRow(classLabel, classHue, p, classIri); }
+        h += `</div>`;
+      }
+      if (inhObj.length > 0) {
+        h += `<div class="tbl" style="margin-bottom:8px">`;
+        h += this.divider('out', `Inherited object properties`, `from ${ancestorNames}`, inhObj.length);
+        for (const p of inhObj) { h += this.schemaPropertyRow(classLabel, classHue, p, classIri); }
+        h += `</div>`;
+      }
+    }
 
-    // used but not declared
-    if (usedOnlyProps.length > 0) {
+    // action buttons (local only)
+    if (!readonly) {
+      h += `<div style="padding:10px 14px 14px; display:flex; gap:8px">`;
+      h += `<button class="add-rel-btn" data-action="newProp" data-class-iri="${esc(classIri)}" data-class-name="${esc(classLabel)}"><span class="codicon codicon-add"></span>Add property</button>`;
+      h += `<button class="add-rel-btn" data-action="newInst" data-class-iri="${esc(classIri)}" data-class-name="${esc(classLabel)}"><span class="codicon codicon-add"></span>New instance</button>`;
+      h += `</div>`;
+    }
+
+    // used but not declared (exclude inherited)
+    const allDeclaredIris = new Set([...propRows, ...inheritedRows].map(r => r.get('p')!.value));
+    const filteredUsed = usedOnlyProps.filter(r => !allDeclaredIris.has(r.get('p')!.value));
+    if (filteredUsed.length > 0) {
       h += `<div style="padding:12px 14px 6px"><div class="ns-section-title">Also used by instances (not in domain)</div></div>`;
-      for (const r of usedOnlyProps) {
+      for (const r of filteredUsed) {
         const pLabel = r.get('pLabel')?.value ?? this.store.localName(r.get('p')!.value);
         h += `<div class="used-row"><span style="font-size:13px;font-weight:600;color:var(--fg)">${esc(pLabel)}</span><span class="mono" style="color:var(--fg-muted)">${esc(this.store.compact(r.get('p')!.value))}</span></div>`;
       }
     }
 
-    if (propRows.length === 0 && usedOnlyProps.length === 0) {
+    if (propRows.length === 0 && inheritedRows.length === 0 && filteredUsed.length === 0) {
       h += `<p class="empty">No properties defined for this class.</p>`;
     }
 
@@ -549,12 +669,14 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
 
   private entityBox(label: string, type: string, iri: string, predIri?: string, dir: 'out' | 'in' = 'out'): string {
     const h = hueFor(type);
-    const truncated = label.length > 30 ? label.slice(0, 28) + '…' : label;
-    const delAttr = predIri && this.selectedIri
-      ? ` data-del-subj="${esc(this.selectedIri)}" data-del-pred="${esc(predIri)}" data-del-obj="${esc(iri)}" data-del-label="${esc(label)}"`
+    const decoded = this.decodeDisplay(label);
+    const truncated = decoded.length > 30 ? decoded.slice(0, 28) + '…' : decoded;
+    const canEdit = !this.isRemote && predIri && this.selectedIri;
+    const delAttr = canEdit
+      ? ` data-del-subj="${esc(this.selectedIri!)}" data-del-pred="${esc(predIri!)}" data-del-obj="${esc(iri)}" data-del-label="${esc(label)}"`
       : '';
-    const editAttr = predIri && this.selectedIri
-      ? ` data-edit-subj="${esc(this.selectedIri)}" data-edit-pred="${esc(predIri)}" data-edit-obj="${esc(iri)}" data-edit-label="${esc(label)}" data-edit-dir="${dir}"`
+    const editAttr = canEdit
+      ? ` data-edit-subj="${esc(this.selectedIri!)}" data-edit-pred="${esc(predIri!)}" data-edit-obj="${esc(iri)}" data-edit-label="${esc(label)}" data-edit-dir="${dir}"`
       : '';
     return `<a class="node-box full clickable" data-iri="${esc(iri)}" title="${esc(label)}  ·  ${esc(type)}" style="--h:${h}"><div class="node-label"><span class="node-dot" style="--h:${h}"></span><span class="node-type" style="--h:${h}">${esc(type)}</span><span class="node-actions"><span class="node-edit edit-rel-btn"${editAttr} style="--h:${h}" title="Edit"><span class="codicon codicon-edit"></span></span><span class="node-x del-btn"${delAttr} style="--h:${h}" title="Remove"><span class="codicon codicon-close"></span></span></span></div><span class="node-name" style="--h:${h}">${esc(truncated)}</span></a>`;
   }
@@ -565,20 +687,25 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     return `<a class="echip" data-iri="${esc(iri)}" title="${esc(label)}  ·  ${esc(type)}" style="--h:${h}"><span class="edot" style="--h:${h}"></span><span class="ename" style="--h:${h}">${esc(truncated)}</span></a>`;
   }
 
+  private decodeDisplay(s: string): string {
+    try { return decodeURIComponent(s); } catch { return s; }
+  }
+
   private valueBox(f: Field, predIri?: string): string {
+    const display = this.decodeDisplay(f.value);
     let content = '';
     switch (f.valueType) {
       case 'boolean':
         content = f.value === 'true' ? `<span class="vb-true">true</span>` : `<span class="vb-false">false</span>`;
         break;
       case 'enum':
-        content = `<span class="vb-enum"><span class="vb-enum-dot"></span>${esc(f.value)}</span>`;
+        content = `<span class="vb-enum"><span class="vb-enum-dot"></span>${esc(display)}</span>`;
         break;
       case 'number': case 'date':
-        content = `<span class="vb-mono">${esc(f.value)}</span>`;
+        content = `<span class="vb-mono">${esc(display)}</span>`;
         break;
       default:
-        content = `<span class="vb-text">${esc(f.value)}</span>`;
+        content = `<span class="vb-text">${esc(display)}</span>`;
     }
     const delAttr = predIri && this.selectedIri
       ? ` data-del-subj="${esc(this.selectedIri)}" data-del-pred="${esc(predIri)}" data-del-obj="${esc(f.value)}"`
@@ -1094,10 +1221,17 @@ document.addEventListener('keydown', e => {
 });
 
 function newClassForm(form) {
+  var superOpts = '<option value="">(none)</option>';
+  if (form.classes) {
+    for (var i = 0; i < form.classes.length; i++) {
+      superOpts += '<option value="' + esc2(form.classes[i].iri) + '">' + esc2(form.classes[i].label) + '</option>';
+    }
+  }
   return '<div class="form-card">'
     + '<div class="form-header"><span class="codicon codicon-symbol-class" style="font-size:16px;color:var(--accent)"></span><span class="form-header-title">New Class</span><span class="form-header-sub">' + esc2(form.ns || '') + '</span><span class="codicon codicon-close" data-action="closeForm" title="Cancel" style="font-size:15px;color:var(--fg-muted);cursor:pointer"></span></div>'
     + '<div class="form-body">'
     + '<div class="form-field"><div class="form-label"><span class="form-label-text">Class name</span><span class="form-label-hint">PascalCase</span></div><input class="form-input" id="fc-name" placeholder="MyClassName" data-oninput="fcUpdate"></div>'
+    + '<div class="form-field"><div class="form-label"><span class="form-label-text">Superclass</span><span class="form-label-hint">optional</span></div><select class="form-input" id="fc-super" style="height:28px">' + superOpts + '</select></div>'
     + '<div class="form-field"><div class="form-label"><span class="form-label-text">Label</span></div><input class="form-input" id="fc-label" placeholder="Display label"></div>'
     + '<div class="form-field"><div class="form-label"><span class="form-label-text">Comment</span><span class="form-label-hint">optional</span></div><textarea class="form-textarea" id="fc-comment" rows="2" placeholder="Description of the class"></textarea></div>'
     + '<div class="form-actions"><button class="form-btn form-btn-secondary" data-action="closeForm">Cancel</button><button class="form-btn form-btn-primary" id="fc-submit" data-action="fcSubmit" disabled>Create Class</button></div>'
@@ -1121,8 +1255,9 @@ function fcSubmit() {
   const name = document.getElementById('fc-name');
   const label = document.getElementById('fc-label');
   const comment = document.getElementById('fc-comment');
+  const superSel = document.getElementById('fc-super');
   if (!name || !name.value) return;
-  vscode.postMessage({ type:'createClass', name:name.value, label:label?.value||name.value, comment:comment?.value||'', ns:'' });
+  vscode.postMessage({ type:'createClass', name:name.value, label:label?.value||name.value, comment:comment?.value||'', ns:'', superclass:superSel?.value||'' });
   closeForm();
   showToast('Created class "' + name.value + '"', false);
 }

@@ -60,7 +60,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   function revealInOntology(iri: string): void {
     try {
-      const node = ontologyProvider.findNode(iri);
+      // Try local first, then remote-prefixed
+      let node = ontologyProvider.findNode(iri);
+      if (!node) { node = ontologyProvider.findNode(`local:${iri}`); }
+      if (!node) { node = ontologyProvider.findNode(`remote:${iri}`); }
       if (node) {
         ontologyTree.reveal(node, { select: true, focus: false, expand: false });
       }
@@ -138,7 +141,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
 
-    vscode.commands.registerCommand('kgExplorer.showProperties', (arg: unknown) => {
+    vscode.commands.registerCommand('kgExplorer.showProperties', async (arg: unknown) => {
       try {
         const nodeKind = typeof arg === 'object' && arg !== null && 'kind' in arg ? (arg as any).kind as string : undefined;
         if (nodeKind === 'namespace') {
@@ -150,8 +153,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const iri = extractIri(arg);
         if (!iri) { return; }
         const isClass = nodeKind === 'class';
-        relationshipsProvider.select(iri, isClass);
-        if (!isClass) { revealInOntology(iri); }
+        const isRemoteNode = typeof arg === 'object' && arg !== null && 'sourceType' in arg && (arg as any).sourceType === 'remote';
+        // Auto-detect remote: if not from a tree node, check if the IRI is in local files
+        const isRemote = isRemoteNode || (!nodeKind && !store.isLocalIri(iri) && store.getRemoteEndpoints().size > 0);
+
+        if (isRemote && !isClass && iri) {
+          const remotes = store.getRemoteEndpoints();
+          const endpointUrl = remotes.size > 0 ? [...remotes.keys()][0] : undefined;
+          await relationshipsProvider.selectRemote(iri, endpointUrl ?? '');
+        } else {
+          relationshipsProvider.select(iri, isClass, isRemote);
+        }
+        // Always try to reveal in ontology tree
+        setTimeout(() => revealInOntology(iri), 200);
       } catch (e) {
         console.error('kgExplorer.showProperties error:', e);
       }
@@ -767,7 +781,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       relationshipsProvider.showForm({ type: 'newClass', ns, prefix });
     }),
 
-    vscode.commands.registerCommand('kgExplorer.commitNewClass', async (name: string, label: string, comment: string, _ns: string) => {
+    vscode.commands.registerCommand('kgExplorer.commitNewClass', async (name: string, label: string, comment: string, _ns: string, superclass?: string) => {
       // find the selected namespace or default
       const currentNs = relationshipsProvider['selectedIri'] ?? '';
       const ns = currentNs.endsWith('#') || currentNs.endsWith('/') ? currentNs : '';
@@ -793,7 +807,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const classIri = ns + name;
       const classCompact = store.compact(classIri) || name;
 
-      let newBlock = `\n${classCompact} a owl:Class ;\n    rdfs:label "${label}"`;
+      let newBlock = `\n${classCompact} a owl:Class ;\n`;
+      if (superclass) {
+        const superCompact = store.compact(superclass);
+        const safeSuperCompact = superCompact.includes(':') ? superCompact : `<${superclass}>`;
+        newBlock += `    rdfs:subClassOf ${safeSuperCompact} ;\n`;
+      }
+      newBlock += `    rdfs:label "${label}"`;
       if (comment) { newBlock += ` ;\n    rdfs:comment "${comment}"`; }
       newBlock += ` .\n`;
 
@@ -861,30 +881,100 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // For outgoing relationships, show entities matching rdfs:range
       // For incoming relationships, show entities matching rdfs:domain
       const lookupProp = dir === 'in' ? 'rdfs:domain' : 'rdfs:range';
-      const typeRows = store.query(`SELECT ?type WHERE { <${predicate}> ${lookupProp} ?type } LIMIT 1`);
-      const targetType = typeRows[0]?.get('type')?.value;
+      const typeRows = store.query(`SELECT ?type WHERE { <${predicate}> ${lookupProp} ?type }`);
+      const genericIris = new Set([
+        'http://www.w3.org/2000/01/rdf-schema#Resource',
+        'http://www.w3.org/2000/01/rdf-schema#Class',
+        'http://www.w3.org/2002/07/owl#Thing',
+        'http://www.w3.org/2002/07/owl#Class',
+        'http://www.w3.org/1999/02/22-rdf-syntax-ns#Property',
+        'http://www.w3.org/2000/01/rdf-schema#Literal',
+      ]);
+      const stdNs = ['http://www.w3.org/2001/XMLSchema#', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+        'http://www.w3.org/2000/01/rdf-schema#', 'http://www.w3.org/2002/07/owl#'];
+      let targetType = typeRows
+        .map(r => r.get('type')!.value)
+        .find(t => !genericIris.has(t) && !stdNs.some(ns => t.startsWith(ns)));
+      // If nothing found, also check the super-property's range
+      if (!targetType) {
+        const superPropRows = store.query(`SELECT ?type WHERE { <${predicate}> rdfs:subPropertyOf ?sp . ?sp ${lookupProp} ?type }`);
+        targetType = superPropRows
+          .map(r => r.get('type')!.value)
+          .find(t => !genericIris.has(t) && !stdNs.some(ns => t.startsWith(ns)));
+      }
+      if (!targetType) { targetType = typeRows[0]?.get('type')?.value; }
 
       const entityRows = targetType
         ? store.query(`SELECT ?inst ?label WHERE { ?inst a <${targetType}> . OPTIONAL { ?inst rdfs:label ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 200`)
         : store.query(`SELECT ?inst ?label WHERE { ?inst rdfs:label ?label . FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 200`);
 
-      const items = entityRows.map(r => ({
-        label: r.get('label')?.value ?? store.localName(r.get('inst')!.value),
-        iri: r.get('inst')!.value,
-      }));
-
-      const picked = await vscode.window.showQuickPick(items, {
-        placeHolder: `Replace "${oldLabel}" with...`,
+      const localItems: (vscode.QuickPickItem & { iri: string })[] = entityRows.map(r => {
+        let label = r.get('label')?.value ?? store.localName(r.get('inst')!.value);
+        try { label = decodeURIComponent(label); } catch { /* */ }
+        return { label, iri: r.get('inst')!.value };
       });
+
+      const hasRemote = targetType && store.getRemoteEndpoints().size > 0;
+
+      const picked = await new Promise<{ iri: string } | undefined>(resolve => {
+        const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { iri: string }>();
+        const rangeName = targetType ? store.localName(targetType) : 'entity';
+        qp.placeholder = hasRemote
+          ? `Replace "${oldLabel}" — search ${rangeName}...`
+          : `Replace "${oldLabel}" with...`;
+        qp.items = localItems;
+        qp.matchOnDetail = true;
+
+        let debounce: ReturnType<typeof setTimeout> | undefined;
+        let lastQuery = '';
+
+        if (hasRemote) {
+          qp.onDidChangeValue(value => {
+            if (debounce) { clearTimeout(debounce); }
+            if (value.length < 2) {
+              qp.items = localItems;
+              lastQuery = '';
+              return;
+            }
+            if (value === lastQuery) { return; }
+            debounce = setTimeout(async () => {
+              lastQuery = value;
+              qp.busy = true;
+              try {
+                const remoteResults = await store.searchRemoteInstances(targetType!, value);
+                const seen = new Set(localItems.map(i => i.iri));
+                const remoteItems = remoteResults
+                  .filter(r => !seen.has(r.iri))
+                  .map(r => ({ label: r.label, detail: '$(globe) remote', iri: r.iri }));
+                const filtered = localItems.filter(i => i.label.toLowerCase().includes(value.toLowerCase()));
+                qp.items = [...filtered, ...remoteItems];
+              } catch { /* keep local */ }
+              qp.busy = false;
+            }, 300);
+          });
+        }
+
+        qp.onDidAccept(() => { const sel = qp.selectedItems[0]; qp.dispose(); resolve(sel); });
+        qp.onDidHide(() => { qp.dispose(); resolve(undefined); });
+        qp.show();
+      });
+
       if (!picked || picked.iri === oldValue) { return; }
 
       const delOk = await editor.deleteTriple(subject, predicate, oldValue, oldLabel);
-      if (delOk) {
-        const addOk = await editor.addTriple(subject, predicate, picked.iri, false);
-        if (addOk) {
-          await loadAllTtl();
-          relationshipsProvider.select(subject, false);
-        }
+      if (!delOk) {
+        // Try with decoded value
+        try {
+          const decoded = decodeURIComponent(oldValue);
+          if (decoded !== oldValue) {
+            await editor.deleteTriple(subject, predicate, decoded, oldLabel);
+          }
+        } catch { /* continue anyway */ }
+      }
+      const addOk = await editor.addTriple(subject, predicate, picked.iri, false);
+      if (addOk) {
+        await loadAllTtl();
+        relationshipsProvider.select(subject, false);
       }
     }),
 
@@ -1060,8 +1150,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
 
-      // show entity picker — filtered by range if available, all labeled entities otherwise
-      console.log(`[KG] addRelationship: final range=${range}, isDatatype=${isDatatype}`);
+      // show entity picker with lazy remote search
       const entityRows = range
         ? store.query(`
             SELECT ?inst ?label WHERE {
@@ -1075,21 +1164,64 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               FILTER(isIRI(?inst))
             } ORDER BY ?label LIMIT 200`);
 
-      const entityItems = entityRows.map(r => ({
-        label: r.get('label')?.value ?? store.localName(r.get('inst')!.value),
-        detail: store.compact(r.get('inst')!.value),
-        iri: r.get('inst')!.value,
-      }));
-
-      if (entityItems.length === 0) {
-        vscode.window.showWarningMessage(`No entities found${range ? ' of type ' + store.localName(range) : ''}`);
-        return;
-      }
-
-      const pickedEntity = await vscode.window.showQuickPick(entityItems, {
-        placeHolder: range ? `Select ${store.localName(range)}...` : 'Select entity...',
-        matchOnDetail: true,
+      const localItems: (vscode.QuickPickItem & { iri: string })[] = entityRows.map(r => {
+        let label = r.get('label')?.value ?? store.localName(r.get('inst')!.value);
+        try { label = decodeURIComponent(label); } catch { /* */ }
+        return { label, detail: store.compact(r.get('inst')!.value), iri: r.get('inst')!.value };
       });
+
+      const hasRemote = range && store.getRemoteEndpoints().size > 0;
+      const rangeName = range ? store.localName(range) : 'entity';
+
+      const pickedEntity = await new Promise<{ iri: string } | undefined>(resolve => {
+        const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { iri: string }>();
+        qp.placeholder = hasRemote
+          ? `Search ${rangeName} (local + remote)...`
+          : `Select ${rangeName}...`;
+        qp.items = localItems;
+        qp.matchOnDetail = true;
+
+        let debounce: ReturnType<typeof setTimeout> | undefined;
+        let lastQuery = '';
+
+        if (hasRemote) {
+          qp.onDidChangeValue(value => {
+            if (debounce) { clearTimeout(debounce); }
+            if (value.length < 2) {
+              qp.items = localItems;
+              lastQuery = '';
+              return;
+            }
+            if (value === lastQuery) { return; }
+            debounce = setTimeout(async () => {
+              lastQuery = value;
+              qp.busy = true;
+              try {
+                const remoteResults = await store.searchRemoteInstances(range!, value);
+                const seen = new Set(localItems.map(i => i.iri));
+                const remoteItems = remoteResults
+                  .filter(r => !seen.has(r.iri))
+                  .map(r => ({ label: r.label, detail: `$(globe) remote`, iri: r.iri }));
+                const filtered = localItems.filter(i => i.label.toLowerCase().includes(value.toLowerCase()));
+                qp.items = [...filtered, ...remoteItems];
+              } catch { /* keep local items */ }
+              qp.busy = false;
+            }, 300);
+          });
+        }
+
+        qp.onDidAccept(() => {
+          const sel = qp.selectedItems[0];
+          qp.dispose();
+          resolve(sel);
+        });
+        qp.onDidHide(() => {
+          qp.dispose();
+          resolve(undefined);
+        });
+        qp.show();
+      });
+
       if (!pickedEntity) { return; }
 
       const ok = await editor.addTriple(subject, pickedPred.iri, pickedEntity.iri, false);

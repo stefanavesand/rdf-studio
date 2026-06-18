@@ -306,6 +306,79 @@ export class RdfStore {
     return this.sourceMap.has(iri);
   }
 
+  async searchRemoteInstances(classIri: string, filter: string): Promise<InstanceInfo[]> {
+    const escaped = filter.replace(/[\\'"]/g, '\\$&').toLowerCase();
+    // Find subclasses to search broader
+    const subclassRows = this.query(`SELECT ?sub WHERE { ?sub <http://www.w3.org/2000/01/rdf-schema#subClassOf> <${classIri}> . ?sub a <http://www.w3.org/2002/07/owl#Class> . FILTER(?sub != <${classIri}>) }`);
+    const typeIris = [classIri, ...subclassRows.map(r => r.get('sub')!.value)];
+    // Common label predicates
+    const labelPreds = ['http://www.w3.org/2000/01/rdf-schema#label', 'http://xmlns.com/foaf/0.1/name'];
+
+    for (const [url] of this.remoteEndpoints) {
+      try {
+        let baseUrl = url.replace(/\/$/, '');
+        if (!baseUrl.endsWith('/query') && !baseUrl.endsWith('/sparql')) {
+          baseUrl += '/query';
+        }
+        const fromClauses = await this.discoverGraphs(baseUrl);
+        const fromStr = fromClauses.length > 0
+          ? fromClauses.map(g => `FROM <${g}>`).join(' ') + ' '
+          : '';
+
+        for (const typeIri of typeIris) {
+          // Strategy 1: exact username match → construct IRI and fetch name (fast on BigTable)
+          const userSparql = `PREFIX sp: <http://metamodel.spotify.net/ontology#> SELECT ?inst ?name ${fromStr}WHERE { ?inst sp:username "${escaped}" . ?inst <http://xmlns.com/foaf/0.1/name> ?name } LIMIT 1`;
+          try {
+            const data = await this.httpGet(`${baseUrl}?query=${encodeURIComponent(userSparql)}`, { 'Accept': 'application/sparql-results+json' });
+            const json = JSON.parse(data);
+            const bindings = json.results?.bindings ?? [];
+            if (bindings.length > 0) {
+              return bindings.map((b: any) => {
+                const iri = b.inst?.value ?? '';
+                let label = b.name?.value ?? this.localName(iri);
+                try { label = decodeURIComponent(label); } catch { /* */ }
+                return { iri, label, types: [classIri] };
+              }).filter((r: any) => r.iri);
+            }
+          } catch { /* try next */ }
+
+          // Strategy 2: construct IRI from username pattern and check existence
+          const candidateIri = `https://backstage.spotify.net/bandmanager/peopleorg/${encodeURIComponent(escaped + '@spotify.com')}`;
+          const iriSparql = `SELECT ?name ${fromStr}WHERE { <${candidateIri}> <http://xmlns.com/foaf/0.1/name> ?name } LIMIT 1`;
+          try {
+            const data = await this.httpGet(`${baseUrl}?query=${encodeURIComponent(iriSparql)}`, { 'Accept': 'application/sparql-results+json' });
+            const json = JSON.parse(data);
+            const bindings = json.results?.bindings ?? [];
+            if (bindings.length > 0) {
+              let label = bindings[0].name?.value ?? escaped;
+              try { label = decodeURIComponent(label); } catch { /* */ }
+              return [{ iri: candidateIri, label, types: [classIri] }];
+            }
+          } catch { /* try next */ }
+
+          // Strategy 3: foaf:name CONTAINS (works on non-BigTable endpoints)
+          for (const labelPred of labelPreds) {
+            const sparql = `SELECT ?inst ?label ${fromStr}WHERE { ?inst a <${typeIri}> . ?inst <${labelPred}> ?label . FILTER(CONTAINS(LCASE(STR(?label)), "${escaped}")) } ORDER BY ?label LIMIT 50`;
+            try {
+              const data = await this.httpGet(`${baseUrl}?query=${encodeURIComponent(sparql)}`, { 'Accept': 'application/sparql-results+json' });
+              const json = JSON.parse(data);
+              const bindings = json.results?.bindings ?? [];
+              if (bindings.length > 0) {
+                return bindings.map((b: any) => {
+                  const iri = b.inst?.value ?? '';
+                  let label = b.label?.value ?? this.localName(iri);
+                  try { label = decodeURIComponent(label); } catch { /* */ }
+                  return { iri, label, types: [classIri] };
+                }).filter((r: any) => r.iri);
+              }
+            } catch { /* try next */ }
+          }
+        }
+      } catch { /* try next endpoint */ }
+    }
+    return [];
+  }
+
   async fetchRemoteInstances(classIri: string): Promise<InstanceInfo[]> {
     const results: InstanceInfo[] = [];
     for (const [url] of this.remoteEndpoints) {
@@ -314,7 +387,6 @@ export class RdfStore {
         if (!baseUrl.endsWith('/query') && !baseUrl.endsWith('/sparql')) {
           baseUrl += '/query';
         }
-        // Discover FROM clauses
         const fromClauses = await this.discoverGraphs(baseUrl);
         const fromStr = fromClauses.length > 0
           ? fromClauses.map(g => `FROM <${g}>`).join(' ') + ' '
@@ -326,12 +398,43 @@ export class RdfStore {
         for (const b of json.results?.bindings ?? []) {
           const iri = b.inst?.value;
           if (!iri) { continue; }
-          const label = b.label?.value ?? this.localName(iri);
+          let label = b.label?.value ?? this.localName(iri);
+          try { label = decodeURIComponent(label); } catch { /* keep as-is */ }
           results.push({ iri, label, types: [classIri] });
         }
       } catch { /* skip this endpoint */ }
     }
     return results;
+  }
+
+  async fetchRemoteEntity(iri: string, endpointUrl?: string): Promise<void> {
+    if (!this.store) { return; }
+    const endpoints = endpointUrl ? [[endpointUrl, { name: '', url: endpointUrl }] as const] : [...this.remoteEndpoints.entries()];
+    for (const [url] of endpoints) {
+      try {
+        let baseUrl = url.replace(/\/$/, '');
+        if (!baseUrl.endsWith('/query') && !baseUrl.endsWith('/sparql')) {
+          baseUrl += '/query';
+        }
+        const fromClauses = await this.discoverGraphs(baseUrl);
+        const fromStr = fromClauses.length > 0
+          ? fromClauses.map(g => `FROM <${g}>`).join(' ') + ' '
+          : '';
+        const sparql = `CONSTRUCT { <${iri}> ?p ?o } ${fromStr}WHERE { <${iri}> ?p ?o }`;
+        const fetchUrl = `${baseUrl}?query=${encodeURIComponent(sparql)}`;
+        const data = await this.httpGet(fetchUrl, { 'Accept': 'application/n-triples' });
+        if (data.trim()) {
+          const trimmed = data.trimStart();
+          if (trimmed.startsWith('<')) {
+            this.store.load(data, { format: 'application/n-triples' }, undefined, undefined);
+          } else {
+            const normalized = data.replace(/^(PREFIX\s+\S+)\s{2,}/gm, '$1 ')
+                                   .replace(/^(@prefix\s+\S+)\s{2,}/gm, '$1 ');
+            this.store.load(normalized, { format: 'text/turtle' }, undefined, undefined);
+          }
+        }
+      } catch { /* skip */ }
+    }
   }
 
   hasLocalNamespace(ns: string): boolean {
