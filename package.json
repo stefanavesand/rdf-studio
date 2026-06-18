@@ -2,7 +2,7 @@
   "name": "rdf-studio",
   "displayName": "RDF Studio",
   "description": "Browse, edit, and validate RDF knowledge graphs with native tree views, SPARQL, and OWL/SHACL support.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "stefanavesand",
   "icon": "images/icon.png",
   "license": "MIT",
