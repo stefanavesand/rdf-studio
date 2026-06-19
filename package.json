@@ -1,10 +1,10 @@
 {
   "name": "rdf-studio",
   "displayName": "RDF Studio",
-  "description": "Browse, edit, and validate RDF knowledge graphs with native tree views, SPARQL, and OWL/SHACL support.",
-  "version": "0.5.1",
+  "description": "Browse, edit, and visualize RDF knowledge graphs with tree views, SPARQL, remote endpoints, and graph visualization.",
+  "version": "1.0.0",
   "publisher": "stefanavesand",
-  "icon": "images/icon.png",
+  "icon": "images/logo.png",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -132,12 +132,6 @@
         "command": "kgExplorer.newProperty",
         "title": "New Property...",
         "icon": "$(symbol-field)",
-        "category": "KG Explorer"
-      },
-      {
-        "command": "kgExplorer.renameEntity",
-        "title": "Rename...",
-        "icon": "$(edit)",
         "category": "KG Explorer"
       },
       {

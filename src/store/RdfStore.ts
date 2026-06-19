@@ -25,6 +25,10 @@ export interface InstanceInfo {
   types: string[];
 }
 
+export function safeIri(iri: string): string {
+  return iri.replace(/[<>"{}|\\^`\n\r]/g, '');
+}
+
 export class RdfStore {
   private store: oxigraph.Store | null = null;
   private prefixes = new Map<string, string>();
@@ -273,7 +277,7 @@ export class RdfStore {
   getLabel(iri: string): string | undefined {
     const rows = this.query(`
       SELECT ?label WHERE {
-        <${iri}> rdfs:label ?label
+        <${safeIri(iri)}> rdfs:label ?label
       } LIMIT 1
     `);
     return rows[0]?.get('label')?.value;
@@ -282,7 +286,7 @@ export class RdfStore {
   getComment(iri: string): string | undefined {
     const rows = this.query(`
       SELECT ?comment WHERE {
-        <${iri}> rdfs:comment ?comment
+        <${safeIri(iri)}> rdfs:comment ?comment
       } LIMIT 1
     `);
     return rows[0]?.get('comment')?.value;
@@ -291,7 +295,7 @@ export class RdfStore {
   getTypes(iri: string): string[] {
     const rows = this.query(`
       SELECT ?type ?label WHERE {
-        <${iri}> a ?type .
+        <${safeIri(iri)}> a ?type .
         OPTIONAL { ?type rdfs:label ?label }
       }
     `);
@@ -313,10 +317,45 @@ export class RdfStore {
     return this.sourceMap.has(iri);
   }
 
+  private static readonly GENERIC_IRIS = new Set([
+    'http://www.w3.org/2000/01/rdf-schema#Resource', 'http://www.w3.org/2000/01/rdf-schema#Class',
+    'http://www.w3.org/2002/07/owl#Thing', 'http://www.w3.org/2002/07/owl#Class',
+    'http://www.w3.org/1999/02/22-rdf-syntax-ns#Property',
+  ]);
+
+  getSuperclassChain(classIri: string): { iri: string; label: string }[] {
+    const chain: { iri: string; label: string }[] = [];
+    let current = safeIri(classIri);
+    const visited = new Set<string>([current]);
+    while (true) {
+      const parents = this.query(`SELECT ?parent ?parentLabel WHERE { <${current}> rdfs:subClassOf ?parent . ?parent a owl:Class . FILTER(?parent != <${current}>) OPTIONAL { ?parent rdfs:label ?parentLabel } }`);
+      const candidates = parents
+        .filter(r => !RdfStore.GENERIC_IRIS.has(r.get('parent')!.value) && !visited.has(r.get('parent')!.value))
+        .map(r => ({ iri: r.get('parent')!.value, label: r.get('parentLabel')?.value ?? this.localName(r.get('parent')!.value) }));
+      if (candidates.length === 0) { break; }
+      const candidateIris = new Set(candidates.map(c => c.iri));
+      const mostSpecific = candidates.find(c => {
+        const sups = this.query(`SELECT ?sup WHERE { <${safeIri(c.iri)}> rdfs:subClassOf ?sup . FILTER(?sup != <${safeIri(c.iri)}>) }`);
+        return sups.some(r => candidateIris.has(r.get('sup')!.value));
+      }) ?? candidates[0];
+      chain.push(mostSpecific);
+      visited.add(mostSpecific.iri);
+      current = mostSpecific.iri;
+    }
+    return chain;
+  }
+
+  getMostSpecificType(iri: string): { iri: string; label: string } | undefined {
+    const rows = this.query(`SELECT ?type ?label WHERE { <${safeIri(iri)}> a ?type . ?type a owl:Class . OPTIONAL { ?type rdfs:label ?label } }`);
+    const specific = rows.filter(r => !RdfStore.GENERIC_IRIS.has(r.get('type')!.value) && !RdfStore.SKIP_NS.some(ns => r.get('type')!.value.startsWith(ns)));
+    if (specific.length === 0) { return undefined; }
+    return { iri: specific[0].get('type')!.value, label: specific[0].get('label')?.value ?? this.localName(specific[0].get('type')!.value) };
+  }
+
   async searchRemoteInstances(classIri: string, filter: string): Promise<InstanceInfo[]> {
     const escaped = filter.replace(/[\\'"]/g, '\\$&').toLowerCase();
     // Find subclasses to search broader
-    const subclassRows = this.query(`SELECT ?sub WHERE { ?sub <http://www.w3.org/2000/01/rdf-schema#subClassOf> <${classIri}> . ?sub a <http://www.w3.org/2002/07/owl#Class> . FILTER(?sub != <${classIri}>) }`);
+    const subclassRows = this.query(`SELECT ?sub WHERE { ?sub <http://www.w3.org/2000/01/rdf-schema#subClassOf> <${safeIri(classIri)}> . ?sub a <http://www.w3.org/2002/07/owl#Class> . FILTER(?sub != <${safeIri(classIri)}>) }`);
     const typeIris = [classIri, ...subclassRows.map(r => r.get('sub')!.value)];
     // Common label predicates
     const labelPreds = ['http://www.w3.org/2000/01/rdf-schema#label', 'http://xmlns.com/foaf/0.1/name'];
@@ -388,7 +427,7 @@ export class RdfStore {
 
   async getRemoteInstances(classIri: string): Promise<InstanceInfo[]> {
     const cached = this.remoteInstanceCache.get(classIri);
-    if (cached && Date.now() - cached.timestamp < RdfStore.INSTANCE_CACHE_TTL) {
+    if (cached && Date.now() - cached.timestamp < RdfStore.CACHE_TTL) {
       return cached.data;
     }
     const data = await this.fetchRemoteInstances(classIri);
@@ -408,7 +447,7 @@ export class RdfStore {
         const fromStr = fromClauses.length > 0
           ? fromClauses.map(g => `FROM <${g}>`).join(' ') + ' '
           : '';
-        const sparql = `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX foaf: <http://xmlns.com/foaf/0.1/> SELECT ?inst ?label ${fromStr}WHERE { ?inst a <${classIri}> . OPTIONAL { ?inst rdfs:label ?label } OPTIONAL { ?inst foaf:name ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 15000`;
+        const sparql = `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX foaf: <http://xmlns.com/foaf/0.1/> SELECT ?inst ?label ${fromStr}WHERE { ?inst a <${safeIri(classIri)}> . OPTIONAL { ?inst rdfs:label ?label } OPTIONAL { ?inst foaf:name ?label } FILTER(isIRI(?inst)) } ORDER BY ?label LIMIT 15000`;
         const fetchUrl = `${baseUrl}?query=${encodeURIComponent(sparql)}`;
         const data = await this.httpGet(fetchUrl, { 'Accept': 'application/sparql-results+json' });
         const json = JSON.parse(data);
@@ -420,6 +459,35 @@ export class RdfStore {
           results.push({ iri, label, types: [classIri] });
         }
       } catch { /* skip this endpoint */ }
+    }
+    return results;
+  }
+
+  async fetchRemoteEntityTriples(iri: string): Promise<{ predicate: string; predicateLabel: string; value: string; isIri: boolean }[]> {
+    const results: { predicate: string; predicateLabel: string; value: string; isIri: boolean }[] = [];
+    for (const [url] of this.remoteEndpoints) {
+      try {
+        let baseUrl = url.replace(/\/$/, '');
+        if (!baseUrl.endsWith('/query') && !baseUrl.endsWith('/sparql')) {
+          baseUrl += '/query';
+        }
+        const fromClauses = await this.discoverGraphs(baseUrl);
+        const fromStr = fromClauses.length > 0
+          ? fromClauses.map(g => `FROM <${g}>`).join(' ') + ' '
+          : '';
+        const safe = safeIri(iri);
+        const sparql = `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> SELECT ?p ?pLabel ?o ${fromStr}WHERE { <${safe}> ?p ?o . OPTIONAL { ?p rdfs:label ?pLabel } }`;
+        const fetchUrl = `${baseUrl}?query=${encodeURIComponent(sparql)}`;
+        const data = await this.httpGet(fetchUrl, { 'Accept': 'application/sparql-results+json' });
+        const json = JSON.parse(data);
+        for (const row of json.results?.bindings ?? []) {
+          const pred = row.p?.value ?? '';
+          const pLabel = row.pLabel?.value ?? this.localName(pred);
+          const obj = row.o?.value ?? '';
+          const isIri = row.o?.type === 'uri';
+          results.push({ predicate: pred, predicateLabel: pLabel, value: obj, isIri });
+        }
+      } catch { /* skip */ }
     }
     return results;
   }
@@ -437,7 +505,8 @@ export class RdfStore {
         const fromStr = fromClauses.length > 0
           ? fromClauses.map(g => `FROM <${g}>`).join(' ') + ' '
           : '';
-        const sparql = `CONSTRUCT { <${iri}> ?p ?o } ${fromStr}WHERE { <${iri}> ?p ?o }`;
+        const safe = safeIri(iri);
+        const sparql = `CONSTRUCT { <${safe}> ?p ?o } ${fromStr}WHERE { <${safe}> ?p ?o }`;
         const fetchUrl = `${baseUrl}?query=${encodeURIComponent(sparql)}`;
         const data = await this.httpGet(fetchUrl, { 'Accept': 'application/n-triples' });
         if (data.trim()) {
@@ -477,19 +546,9 @@ export class RdfStore {
         return prefix ? `${prefix}:${local}` : `:${local}`;
       }
     }
-    return this.localName(iri);
+    return `<${iri}>`;
   }
 
-  private countInstances(classIri: string): number {
-    const rows = this.query(`
-      SELECT (COUNT(DISTINCT ?inst) AS ?count) WHERE {
-        ?inst a <${classIri}> .
-        FILTER(isIRI(?inst))
-      }
-    `);
-    const val = rows[0]?.get('count')?.value;
-    return val ? parseInt(val, 10) : 0;
-  }
 
   private groupByPredicate(rows: Row[]): PropertyInfo[] {
     const grouped = new Map<string, PropertyInfo>();
@@ -511,12 +570,13 @@ export class RdfStore {
     return [...grouped.values()];
   }
 
-  private graphCache = new Map<string, string[]>();
+  private graphCache = new Map<string, { graphs: string[]; timestamp: number }>();
   private remoteInstanceCache = new Map<string, { data: InstanceInfo[]; timestamp: number }>();
-  private static readonly INSTANCE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+  private static readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
   private async discoverGraphs(queryUrl: string): Promise<string[]> {
-    if (this.graphCache.has(queryUrl)) { return this.graphCache.get(queryUrl)!; }
+    const cached = this.graphCache.get(queryUrl);
+    if (cached && Date.now() - cached.timestamp < RdfStore.CACHE_TTL) { return cached.graphs; }
     // Step 1: check if default graph has data
     try {
       const probeUrl = `${queryUrl}?query=${encodeURIComponent('SELECT * WHERE { ?s ?p ?o } LIMIT 1')}`;
@@ -540,7 +600,7 @@ export class RdfStore {
           'urn:x-codex:graph:contributed',
           snapshot,
         ];
-        this.graphCache.set(queryUrl, graphs);
+        this.graphCache.set(queryUrl, { graphs, timestamp: Date.now() });
         return graphs;
       }
     } catch { /* continue */ }
@@ -560,7 +620,7 @@ export class RdfStore {
       }
     } catch { /* default graph it is */ }
 
-    this.graphCache.set(queryUrl, []);
+    this.graphCache.set(queryUrl, { graphs: [], timestamp: Date.now() });
     return [];
   }
 
@@ -596,7 +656,8 @@ export class RdfStore {
       const line = lines[i];
       const prefixed = line.match(/^:(\S+)/);
       if (prefixed) {
-        const ns = this.prefixes.get('') ?? 'https://spotify.net/id/fin/ar/';
+        const ns = this.prefixes.get('');
+        if (!ns) { continue; }
         const local = prefixed[1].replace(/\s.*$/, '');
         this.sourceMap.set(ns + local, { uri: file, line: i });
         continue;

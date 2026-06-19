@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
 import { RdfStore } from './store/RdfStore';
+import { hueFor } from './typeColors';
 
 interface GraphNode {
   id: string;
   label: string;
   type: string;
+  hue: number;
   isFocus: boolean;
 }
 
@@ -23,7 +25,8 @@ export class GraphPanel {
     const { nodes, edges } = this.buildNeighborhood(focusIri);
     if (nodes.length === 0) { return; }
 
-    const label = this.store.getLabel(focusIri) ?? this.store.localName(focusIri);
+    let label = this.store.getLabel(focusIri) ?? this.store.localName(focusIri);
+    try { label = decodeURIComponent(label); } catch { /* */ }
 
     if (!this.panel) {
       this.panel = vscode.window.createWebviewPanel(
@@ -60,10 +63,14 @@ export class GraphPanel {
         return;
       }
       const types = this.store.getTypes(iri);
+      const type = types[0] ?? 'Resource';
+      let label = this.store.getLabel(iri) ?? this.store.localName(iri);
+      try { label = decodeURIComponent(label); } catch { /* */ }
       nodeMap.set(iri, {
         id: iri,
-        label: this.store.getLabel(iri) ?? this.store.localName(iri),
-        type: types[0] ?? 'Resource',
+        label,
+        type,
+        hue: hueFor(type),
         isFocus,
       });
     };
@@ -156,25 +163,12 @@ const nodes = ${nodesJson};
 const edges = ${edgesJson};
 const focusIri = ${JSON.stringify(focusIri)};
 
-const TYPE_COLORS = {
-  'Class': '#4fc3f7',
-  'Process': '#81c784',
-  'StandardOperatingProcedure': '#ffb74d',
-  'SOXControl': '#e57373',
-  'System': '#ba68c8',
-  'Role': '#4dd0e1',
-  'Journey': '#aed581',
-  'AccountingArea': '#fff176',
-  'DataObject': '#90a4ae',
-  'Resource': '#78909c',
-};
-
-function colorFor(type) {
-  for (const [k, v] of Object.entries(TYPE_COLORS)) {
-    if (type.includes(k)) return v;
-  }
-  return '#78909c';
+var isDark = document.body.classList.contains('vscode-dark') || document.body.getAttribute('data-vscode-theme-kind') === 'vscode-dark';
+function hslFor(hue, focus) {
+  if (isDark) return 'hsl(' + hue + ' 58% ' + (focus ? '62' : '52') + '%)';
+  return 'hsl(' + hue + ' 55% ' + (focus ? '45' : '55') + '%)';
 }
+function colorFor(node) { return hslFor(node.hue, node.isFocus); }
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -193,15 +187,18 @@ function resize() {
 resize();
 window.addEventListener('resize', () => { resize(); draw(); });
 
-// Init positions
-for (const n of nodes) {
+// Init positions — focus node at origin, others around it
+var idx = 0;
+for (var ni2 = 0; ni2 < nodes.length; ni2++) {
+  var n = nodes[ni2];
   if (n.isFocus) {
-    n.x = W / 2; n.y = H / 2;
+    n.x = 0; n.y = 0;
   } else {
-    const angle = Math.random() * Math.PI * 2;
-    const r = 120 + Math.random() * 80;
-    n.x = W / 2 + Math.cos(angle) * r;
-    n.y = H / 2 + Math.sin(angle) * r;
+    var angle = (idx / (nodes.length - 1 || 1)) * Math.PI * 2;
+    var r = 120 + (idx % 3) * 30;
+    n.x = Math.cos(angle) * r;
+    n.y = Math.sin(angle) * r;
+    idx++;
   }
   n.vx = 0; n.vy = 0;
 }
@@ -209,11 +206,13 @@ for (const n of nodes) {
 const nodeById = new Map(nodes.map(n => [n.id, n]));
 
 // Build legend
-const types = [...new Set(nodes.map(n => n.type))].sort();
-const legend = document.getElementById('legend');
-legend.innerHTML = types.map(t =>
-  '<div class="legend-item"><div class="legend-dot" style="background:' + colorFor(t) + '"></div>' + t + '</div>'
-).join('');
+var typeHues = {};
+for (var ni = 0; ni < nodes.length; ni++) { typeHues[nodes[ni].type] = nodes[ni].hue; }
+var types = Object.keys(typeHues).sort();
+var legend = document.getElementById('legend');
+legend.innerHTML = types.map(function(t) {
+  return '<div class="legend-item"><div class="legend-dot" style="background:' + hslFor(typeHues[t], false) + '"></div>' + t + '</div>';
+}).join('');
 
 // Force simulation
 function simulate() {
@@ -246,10 +245,10 @@ function simulate() {
     b.vx -= fx; b.vy -= fy;
   }
 
-  // Center gravity
+  // Center gravity (toward origin)
   for (const n of nodes) {
-    n.vx += (W / 2 - n.x) * 0.001;
-    n.vy += (H / 2 - n.y) * 0.001;
+    n.vx += (0 - n.x) * 0.001;
+    n.vy += (0 - n.y) * 0.001;
     n.vx *= damping;
     n.vy *= damping;
     if (!n.pinned) {
@@ -314,7 +313,7 @@ function draw() {
   // Nodes
   for (const n of nodes) {
     const r = n.isFocus ? 20 : 14;
-    const color = colorFor(n.type);
+    const color = colorFor(n);
 
     ctx.beginPath();
     ctx.arc(n.x, n.y, r, 0, Math.PI * 2);

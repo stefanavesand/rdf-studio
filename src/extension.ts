@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { RdfStore } from './store/RdfStore';
+import { RdfStore, safeIri } from './store/RdfStore';
 import { OntologyTreeProvider, TreeNode } from './tree/OntologyTreeProvider';
 import { RelationshipsWebview } from './RelationshipsWebview';
 import { SparqlPanel } from './SparqlPanel';
@@ -152,7 +152,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         const iri = extractIri(arg);
         if (!iri) { return; }
-        const isClass = nodeKind === 'class';
+        // Auto-detect class: if no nodeKind hint, check if this IRI is an owl:Class
+        const isClass = nodeKind === 'class' || (!nodeKind && store.query(`SELECT ?x WHERE { <${safeIri(iri)}> a owl:Class } LIMIT 1`).length > 0);
         const isRemoteNode = typeof arg === 'object' && arg !== null && 'sourceType' in arg && (arg as any).sourceType === 'remote';
         // Auto-detect remote: if not from a tree node, check if the IRI is in local files
         const isRemote = isRemoteNode || (!nodeKind && !store.isLocalIri(iri) && store.getRemoteEndpoints().size > 0);
@@ -163,6 +164,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           await relationshipsProvider.selectRemote(iri, endpointUrl ?? '');
         } else {
           relationshipsProvider.select(iri, isClass, isRemote);
+          // Auto-fetch remote properties for local instances with remote superclasses
+          if (!isRemote && !isClass && iri && store.getRemoteEndpoints().size > 0) {
+            const typeRows = store.query(`SELECT ?type WHERE { <${iri}> a ?type . ?type a owl:Class . } LIMIT 1`);
+            const classIri = typeRows[0]?.get('type')?.value;
+            if (classIri) {
+              const parentRows = store.query(`
+                SELECT ?parent ?parentLabel WHERE {
+                  <${classIri}> rdfs:subClassOf+ ?parent .
+                  ?parent a owl:Class .
+                  FILTER(?parent != <${classIri}>)
+                  OPTIONAL { ?parent rdfs:label ?parentLabel }
+                }
+              `);
+              for (const r of parentRows) {
+                const parentIri = r.get('parent')!.value;
+                const ns = parentIri.includes('#') ? parentIri.substring(0, parentIri.lastIndexOf('#') + 1) : parentIri.substring(0, parentIri.lastIndexOf('/') + 1);
+                if (!store.hasLocalNamespace(ns)) {
+                  const parentLabel = r.get('parentLabel')?.value ?? store.localName(parentIri);
+                  const remoteName = [...store.getRemoteEndpoints().values()][0]?.name ?? 'Remote';
+                  relationshipsProvider.setRemoteLoading(remoteName, parentLabel);
+                  store.fetchRemoteEntityTriples(iri).then((triples) => {
+                    relationshipsProvider.setRemoteProps(iri, triples);
+                  }).catch(() => {
+                    relationshipsProvider.setRemoteProps(iri, []);
+                  });
+                  break;
+                }
+              }
+            }
+          }
         }
         // Always try to reveal in ontology tree
         setTimeout(() => revealInOntology(iri), 200);
@@ -634,12 +665,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
 
-    vscode.commands.registerCommand('kgExplorer.renameEntity', async (arg: unknown) => {
-      const iri = extractIri(arg);
-      if (!iri) { return; }
-      vscode.window.showInformationMessage('Rename — coming in Phase 5');
-    }),
-
     vscode.commands.registerCommand('kgExplorer.deleteOntology', async (arg: unknown) => {
       let ns = '';
       if (typeof arg === 'object' && arg !== null && 'kind' in arg && (arg as any).kind === 'namespace') {
@@ -834,20 +859,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const typeRow = store.query(`SELECT ?t WHERE { <${subject}> a ?t . ?t a owl:Class . } LIMIT 1`);
       const classIri = typeRow[0]?.get('t')?.value;
 
-      // Walk superclass chain for inherited properties
-      const superclasses: string[] = [];
-      if (classIri) {
-        const visited = new Set<string>([classIri]);
-        const queue = [classIri];
-        while (queue.length > 0) {
-          const current = queue.shift()!;
-          const parents = store.query(`SELECT ?parent WHERE { <${current}> rdfs:subClassOf ?parent . ?parent a owl:Class . FILTER(?parent != <${current}>) }`);
-          for (const r of parents) {
-            const p = r.get('parent')!.value;
-            if (!visited.has(p)) { visited.add(p); superclasses.push(p); queue.push(p); }
-          }
-        }
-      }
+      const superclasses = classIri ? store.getSuperclassChain(classIri).map(c => c.iri) : [];
       const domainFilter = [classIri, ...superclasses].filter(Boolean).map(c => `{ ?p rdfs:domain <${c}> . }`).join(' UNION ');
 
       const predRows = classIri
@@ -897,20 +909,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const typeRow = store.query(`SELECT ?t WHERE { <${subject}> a ?t . ?t a owl:Class . } LIMIT 1`);
       const classIri = typeRow[0]?.get('t')?.value;
 
-      const allClasses: string[] = classIri ? [classIri] : [];
-      if (classIri) {
-        const visited = new Set<string>([classIri]);
-        const queue = [classIri];
-        while (queue.length > 0) {
-          const current = queue.shift()!;
-          const parents = store.query(`SELECT ?parent WHERE { <${current}> rdfs:subClassOf ?parent . ?parent a owl:Class . FILTER(?parent != <${current}>) }`);
-          for (const r of parents) {
-            const p = r.get('parent')!.value;
-            if (!visited.has(p)) { visited.add(p); allClasses.push(p); queue.push(p); }
-          }
-        }
-      }
-
+      const allClasses = classIri ? [classIri, ...store.getSuperclassChain(classIri).map(c => c.iri)] : [];
       const domainFilter = allClasses.map(c => `{ ?p rdfs:domain <${c}> . }`).join(' UNION ');
       const predRows = store.query(`
         SELECT DISTINCT ?p ?pLabel WHERE {

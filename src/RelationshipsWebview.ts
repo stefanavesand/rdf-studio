@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { RdfStore } from './store/RdfStore';
-import { SchemaService, ValidationResult, PropertyDef, ShaclShape, ShaclConstraint } from './store/SchemaService';
+import { SchemaService } from './store/SchemaService';
 import { hueFor } from './typeColors';
 
 interface GroupedEdge {
@@ -75,6 +75,7 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
         vscode.commands.executeCommand('kgExplorer.commitAddParam', msg.subject, msg.predicate, msg.value);
       } else if (msg.type === 'loadRemoteEntities') {
         vscode.commands.executeCommand('kgExplorer.loadRemoteEntities', msg.rangeIri, msg.rangeName);
+      } else if (msg.type === 'fetchRemoteProps') { // legacy, unused
       } else if (msg.type === 'commitEditRel') {
         vscode.commands.executeCommand('kgExplorer.commitEditRelationship', msg.subject, msg.predicate, msg.oldValue, msg.newValue, msg.oldLabel);
       } else if (msg.type === 'searchEditRel') {
@@ -126,11 +127,19 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
   }
 
   private isRemote = false;
+  private remoteLoading = false;
+  private remoteSourceName = '';
+  private remoteParentType = '';
+  private cachedFocusType = '';
+  private cachedFocusHue = 0;
 
   select(iri: string, isClass = false, remote = false): void {
     this.selectedIri = iri;
     this.selectedMode = isClass ? 'class' : 'instance';
     this.isRemote = remote;
+    this.remoteLoading = false;
+    this.remoteSourceName = '';
+    this.remoteParentType = '';
     this.refresh();
   }
 
@@ -151,6 +160,71 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
       await this.store.fetchRemoteEntity(iri, endpointUrl);
     } catch { /* render with whatever we have */ }
     this.refresh();
+  }
+
+  private localFieldKeys = new Set<string>();
+  private localOutGroupKeys = new Set<string>();
+
+  setRemoteLoading(sourceName: string, parentType: string): void {
+    this.remoteLoading = true;
+    this.remoteSourceName = sourceName;
+    this.remoteParentType = parentType;
+    // Capture current local keys so we can diff after fetch
+    if (this.selectedIri) {
+      this.localFieldKeys = new Set(this.getFields(this.selectedIri).map(f => `${f.predIri}|${f.value}`));
+      this.localOutGroupKeys = new Set(this.buildGroups(this.selectedIri, 'out').flatMap(g => g.items.map(i => `${g.relation}|${i.iri}`)));
+    }
+    this.refresh();
+  }
+
+  setRemoteProps(iri: string, triples: { predicate: string; predicateLabel: string; value: string; isIri: boolean }[]): void {
+    if (iri !== this.selectedIri || !this.view) { return; }
+    this.remoteLoading = false;
+
+    // Skip rdf:type triples and triples that already exist locally
+    const skipPredicates = new Set(['http://www.w3.org/1999/02/22-rdf-syntax-ns#type']);
+    const filtered = triples.filter(t => !skipPredicates.has(t.predicate) && !this.localFieldKeys.has(`${t.predicate}|${t.value}`));
+
+    // Split into params (literals) and relationships (IRIs)
+    const params = filtered.filter(t => !t.isIri);
+    const rels = filtered.filter(t => t.isIri);
+
+    // Group relationships by predicate
+    const relGroups = new Map<string, { label: string; items: { iri: string; label: string; type: string }[] }>();
+    for (const t of rels) {
+      if (!this.localOutGroupKeys.has(`${t.predicate}|${t.value}`)) {
+        if (!relGroups.has(t.predicate)) {
+          relGroups.set(t.predicate, { label: t.predicateLabel, items: [] });
+        }
+        let objLabel = this.store.getLabel(t.value) ?? this.store.localName(t.value);
+        try { objLabel = decodeURIComponent(objLabel); } catch { /* */ }
+        relGroups.get(t.predicate)!.items.push({ iri: t.value, label: objLabel, type: '' });
+      }
+    }
+
+    // Build HTML — use parent type name for the "this" box
+    const parentType = this.remoteParentType;
+    const parentHue = hueFor(parentType);
+    let html = '';
+    if (params.length > 0) {
+      html += `<div class="tbl remote-section" style="margin-bottom:8px">`;
+      html += `<div class="divider remote-div"><span class="div-bar remote-bar"></span><span class="div-label remote-label">Inherited parameters</span><span class="div-hint">from ${esc(parentType)} · ${esc(this.remoteSourceName)}</span><span class="remote-ro"><span class="codicon codicon-lock" style="font-size:9px"></span> read-only</span><span style="margin-left:auto;font-size:10px;color:var(--fg-muted)">${params.length}</span></div>`;
+      for (const t of params) {
+        const f: Field = { name: t.predicateLabel, predIri: t.predicate, valueType: this.inferValueType(t.value), value: t.value };
+        html += this.paramRow(parentType, parentHue, f);
+      }
+      html += `</div>`;
+    }
+    if (relGroups.size > 0) {
+      const inhRelCount = [...relGroups.values()].reduce((n, g) => n + g.items.length, 0);
+      html += `<div class="tbl remote-section" style="margin-bottom:8px">`;
+      html += `<div class="divider remote-div"><span class="div-bar remote-bar"></span><span class="div-label remote-label">Inherited relationships</span><span class="div-hint">from ${esc(parentType)} · ${esc(this.remoteSourceName)}</span><span class="remote-ro"><span class="codicon codicon-lock" style="font-size:9px"></span> read-only</span><span style="margin-left:auto;font-size:10px;color:var(--fg-muted)">${inhRelCount}</span></div>`;
+      for (const [, g] of relGroups) {
+        html += this.edgeRow(parentType, parentHue, { relation: '', relationLabel: g.label, items: g.items }, 'out');
+      }
+      html += `</div>`;
+    }
+    this.view.webview.postMessage({ type: 'remoteProps', html });
   }
 
   showForm(form: { type: string; [key: string]: unknown }): void {
@@ -194,6 +268,8 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     const types = this.store.getTypes(iri);
     const focusType = types[0] ?? 'Resource';
     const focusHue = hueFor(focusType);
+    this.cachedFocusType = focusType;
+    this.cachedFocusHue = focusHue;
 
     const fields = this.getFields(iri);
     const outGroups = this.buildGroups(iri, 'out');
@@ -201,36 +277,23 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     const relCount = outGroups.reduce((n, g) => n + g.items.length, 0)
       + inGroups.reduce((n, g) => n + g.items.length, 0);
 
-    const validation: import('./store/SchemaService').ValidationResult = { violations: [], warnings: [] };
-    const issueCount = 0;
-
     const readonly = this.isRemote;
     let h = '';
 
-    // breadcrumb
+    // breadcrumb with full class chain as pills
+    const classChain = this.getClassChain(iri);
     h += `<div class="crumb-strip">`;
     h += `<span class="crumb-kind">${readonly ? 'REMOTE' : 'INSTANCE'}</span>`;
     h += `<a class="crumb-pill" style="--h:${focusHue}" data-iri="${esc(iri)}"><span class="crumb-dot" style="--h:${focusHue}"></span><span class="crumb-name" style="--h:${focusHue}">${esc(label)}</span></a>`;
-    h += `<span class="codicon codicon-chevron-right" style="font-size:13px;color:var(--fg-muted)"></span>`;
-    h += `<span class="crumb-parent">${esc(focusType)}</span>`;
+    for (const cls of classChain) {
+      const clsHue = hueFor(cls.label);
+      h += `<span class="codicon codicon-chevron-right" style="font-size:13px;color:var(--fg-muted)"></span>`;
+      h += `<a class="crumb-pill crumb-pill-class" style="--h:${clsHue}" data-iri="${esc(cls.iri)}" title="${esc(cls.iri)}"><span class="crumb-dot" style="--h:${clsHue}"></span><span class="crumb-name" style="--h:${clsHue}">${esc(cls.label)}</span></a>`;
+    }
     if (!readonly) {
       h += `<span style="margin-left:auto" class="crumb-edit codicon codicon-edit" data-action="editEntity" data-iri="${esc(iri)}" data-label="${esc(label)}" data-comment="${esc(this.store.getComment(iri) ?? '')}" title="Edit entity"></span>`;
     }
     h += `</div>`;
-
-    // validation banner
-    if (issueCount > 0) {
-      h += `<div class="val-banner val-fail">`;
-      h += `<span class="codicon codicon-error" style="font-size:15px;color:var(--err)"></span>`;
-      h += `<span class="val-title">Fails validation</span>`;
-      if (validation.violations.length > 0) {
-        h += `<span class="val-pill viol-pill">${validation.violations.length} Violation${validation.violations.length > 1 ? 's' : ''}</span>`;
-      }
-      if (validation.warnings.length > 0) {
-        h += `<span class="val-pill warn-pill">${validation.warnings.length} Warning${validation.warnings.length > 1 ? 's' : ''}</span>`;
-      }
-      h += `</div>`;
-    }
 
     // counts
     h += `<div class="counts">${relCount} relations · ${fields.length} parameters on <span class="accent">this</span> entity</div>`;
@@ -239,31 +302,22 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     h += `<div class="col-headers"><div class="c-src">Source</div><div class="c-rel">Relation</div><div class="c-tgt">Target</div></div>`;
 
     // parameters
-    if (fields.length > 0 || this.getMissingParams(iri, validation).length > 0) {
+    if (fields.length > 0) {
       h += `<div class="tbl" style="margin-bottom:8px">`;
       h += this.divider('param', 'Parameters', 'named values on this entity', fields.length);
       for (const f of fields) {
         h += this.paramRow(focusType, focusHue, f);
       }
-      for (const issue of this.getMissingParams(iri, validation)) {
-        h += this.ghostRow(focusType, focusHue, issue.pathLabel, issue.severity,
-          issue.expectedRangeLabel ?? 'value', issue.isObject, issue.message, issue.path, issue.expectedRange);
-      }
       h += `</div>`;
     }
 
     // outgoing
-    const missingOut = this.getMissingOutgoing(iri, validation);
-    if (outGroups.length > 0 || missingOut.length > 0) {
+    if (outGroups.length > 0) {
       h += `<div class="tbl" style="margin-bottom:8px">`;
       const outCount = outGroups.reduce((n, g) => n + g.items.length, 0);
       h += this.divider('out', 'Outgoing', 'this entity is the source', outCount);
       for (const g of outGroups) {
         h += this.edgeRow(focusType, focusHue, g, 'out');
-      }
-      for (const issue of missingOut) {
-        h += this.ghostRow(focusType, focusHue, issue.pathLabel, issue.severity,
-          issue.expectedRangeLabel ?? 'entity', issue.isObject, issue.message, issue.path, issue.expectedRange);
       }
       h += `</div>`;
     }
@@ -277,6 +331,15 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
         h += this.edgeRow(focusType, focusHue, g, 'in');
       }
       h += `</div>`;
+    }
+
+    // inherited properties placeholder (replaced via postMessage when remote fetch completes)
+    if (this.remoteLoading) {
+      h += `<div id="remote-props">`;
+      h += `<div class="tbl remote-section" style="margin-bottom:8px">`;
+      h += `<div class="divider remote-div"><span class="div-bar remote-bar"></span><span class="div-label remote-label">Inherited properties</span><span class="div-hint">from ${esc(this.remoteParentType)} · ${esc(this.remoteSourceName)}</span><span class="remote-ro"><span class="codicon codicon-lock" style="font-size:9px"></span> read-only</span></div>`;
+      h += `<div style="padding:12px 14px;text-align:center;color:var(--fg-muted)"><span class="codicon codicon-loading codicon-modifier-spin" style="font-size:14px"></span><span style="margin-left:8px;font-size:12px">Loading...</span></div>`;
+      h += `</div></div>`;
     }
 
     // action buttons (local only)
@@ -447,18 +510,20 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     const readonly = this.isRemote;
     let h = '';
 
-    // breadcrumb
+    // breadcrumb with full superclass chain
+    const schemaChain = this.store.getSuperclassChain(classIri);
     h += `<div class="crumb-strip">`;
     h += `<span class="crumb-kind">${readonly ? 'REMOTE CLASS' : 'CLASS'}</span>`;
     h += `<span class="crumb-pill" style="--h:${classHue}"><span class="crumb-dot" style="--h:${classHue}"></span><span class="crumb-name" style="--h:${classHue}">${esc(classLabel)}</span></span>`;
-    if (superclass) {
-      const superIri = directSuperRows[0]!.get('parent')!.value;
-      const superHue = hueFor(superclass);
-      h += `<span class="codicon codicon-chevron-right" style="font-size:13px;color:var(--fg-muted)"></span>`;
-      h += `<a class="crumb-pill" style="--h:${superHue};cursor:pointer" data-iri="${esc(superIri)}" title="Superclass"><span class="crumb-dot" style="--h:${superHue}"></span><span class="crumb-name" style="--h:${superHue}">${esc(superclass)}</span></a>`;
+    if (schemaChain.length > 0) {
+      for (const sc of schemaChain) {
+        const scHue = hueFor(sc.label);
+        h += `<span class="codicon codicon-chevron-right" style="font-size:13px;color:var(--fg-muted)"></span>`;
+        h += `<a class="crumb-pill crumb-pill-class" style="--h:${scHue}" data-iri="${esc(sc.iri)}" title="${esc(sc.iri)}"><span class="crumb-dot" style="--h:${scHue}"></span><span class="crumb-name" style="--h:${scHue}">${esc(sc.label)}</span></a>`;
+      }
     } else {
       h += `<span class="codicon codicon-chevron-right" style="font-size:13px;color:var(--fg-muted)"></span>`;
-      h += `<span class="crumb-parent">owl:Class</span>`;
+      h += `<span class="crumb-pill crumb-pill-class" style="--h:0;opacity:.5"><span class="crumb-name" style="--h:0">owl:Class</span></span>`;
     }
     if (!readonly) {
       h += `<span style="margin-left:auto" class="crumb-edit codicon codicon-edit" data-action="editClass" data-iri="${esc(classIri)}" data-label="${esc(classLabel)}" data-comment="${esc(comment ?? '')}" title="Edit class"></span>`;
@@ -571,32 +636,6 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     return h;
   }
 
-  private ghostRow(focusType: string, focusHue: number, propLabel: string,
-    severity: 'violation' | 'warning' | 'optional', rangeLabel: string,
-    isObject: boolean, message: string, propIri?: string, rangeIri?: string): string {
-
-    const sevClass = severity === 'violation' ? 'sev-viol' : severity === 'warning' ? 'sev-warn' : 'sev-opt';
-    const sevLabel = severity === 'violation' ? 'Required' : severity === 'warning' ? 'Recommended' : 'Optional';
-    const addAttr = propIri && this.selectedIri
-      ? ` data-add-subj="${esc(this.selectedIri)}" data-add-pred="${esc(propIri)}" data-add-range="${esc(rangeIri ?? '')}" data-add-isobj="${isObject}"`
-      : '';
-
-    let h = `<div class="row ghost-row ${sevClass}-row">`;
-    h += `<div class="c-src cell">${this.thisBox(focusType, focusHue)}</div>`;
-    h += `<div class="c-rel cell"><span class="rel-name">${esc(propLabel)}</span>`;
-    h += `<span class="connector"><span class="conn-line-dashed ${sevClass}-line"></span><span class="conn-arrow ${sevClass}-arrow">&#9656;</span></span>`;
-    h += `<span class="sev-pill ${sevClass}-pill">${sevLabel}</span></div>`;
-    h += `<div class="c-tgt cell"><div class="ghost-target ${sevClass}-ghost add-btn"${addAttr}>`;
-    h += `<span class="gt-label">Expected</span>`;
-    h += `<span class="gt-range">${esc(rangeLabel)}</span>`;
-    if (severity !== 'optional') {
-      h += `<span class="gt-add ${sevClass}-add">&#65291; Add value</span>`;
-    }
-    h += `</div></div>`;
-    h += `</div>`;
-    return h;
-  }
-
   private schemaPropertyRow(classLabel: string, classHue: number, row: Map<string, { value: string; termType: string }>, classIri?: string): string {
     const pIri = row.get('p')!.value;
     const pLabel = row.get('pLabel')?.value ?? this.store.localName(pIri);
@@ -638,34 +677,6 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     if (isObject && !rangeVal) {
       h += `<div class="c-tgt cell"><span class="range-box" style="border-color:var(--err);"><span class="rb-label"><span class="rb-dot" style="background:var(--err)"></span><span class="rb-type" style="color:var(--err)">Expected</span></span><span class="rb-name" style="color:var(--err)">${esc(rangeLabel)}</span></span></div>`;
     } else if (isObject) {
-      h += `<div class="c-tgt cell"><span class="range-box" style="--h:${rangeHue}"><span class="rb-label"><span class="rb-dot" style="--h:${rangeHue}"></span><span class="rb-type" style="--h:${rangeHue}">Expected</span></span><span class="rb-name" style="--h:${rangeHue}">${esc(rangeLabel)}</span></span></div>`;
-    } else {
-      h += `<div class="c-tgt cell"><span class="range-box-dt"><span class="rbd-label">Datatype</span><span class="rbd-name">${esc(rangeLabel)}</span></span></div>`;
-    }
-    h += `</div>`;
-    return h;
-  }
-
-  private schemaRow(classLabel: string, classHue: number, p: PropertyDef, c: ShaclConstraint | undefined): string {
-    const sevLabel = c?.minCount && c.minCount > 0
-      ? (c.severity === 'violation' ? 'Required' : 'Recommended')
-      : 'Optional';
-    const sevClass = c?.minCount && c.minCount > 0
-      ? (c.severity === 'violation' ? 'sev-viol' : 'sev-warn')
-      : 'sev-opt';
-
-    const rangeLabel = p.rangeLabel ?? 'any';
-    const rangeHue = p.isObject && p.range ? hueFor(this.store.localName(p.range)) : 0;
-
-    let h = `<div class="row param-hover">`;
-    // class pivot
-    h += `<div class="c-src cell"><span class="class-box compact" style="--h:${classHue}"><span class="cb-label"><span class="cb-dot" style="--h:${classHue}"></span><span class="cb-type" style="--h:${classHue}">Class</span></span><span class="cb-name" style="--h:${classHue}">${esc(classLabel)}</span></span></div>`;
-    // property name + constraint pill
-    h += `<div class="c-rel cell"><span class="rel-name" style="font-weight:600;color:var(--fg)">${esc(p.label)}</span>`;
-    h += `<span class="connector"><span class="conn-line-dashed sev-opt-line"></span><span class="conn-arrow sev-opt-arrow">&#9656;</span></span>`;
-    h += `<span class="sev-pill ${sevClass}-pill">${sevLabel}</span></div>`;
-    // range
-    if (p.isObject) {
       h += `<div class="c-tgt cell"><span class="range-box" style="--h:${rangeHue}"><span class="rb-label"><span class="rb-dot" style="--h:${rangeHue}"></span><span class="rb-type" style="--h:${rangeHue}">Expected</span></span><span class="rb-name" style="--h:${rangeHue}">${esc(rangeLabel)}</span></span></div>`;
     } else {
       h += `<div class="c-tgt cell"><span class="range-box-dt"><span class="rbd-label">Datatype</span><span class="rbd-name">${esc(rangeLabel)}</span></span></div>`;
@@ -741,6 +752,12 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
     return `<span class="rel-name">${esc(label)}</span><span class="codicon codicon-arrow-small-right rel-arrow"></span>`;
   }
 
+  private getClassChain(iri: string): { iri: string; label: string }[] {
+    const type = this.store.getMostSpecificType(iri);
+    if (!type) { return []; }
+    return [type, ...this.store.getSuperclassChain(type.iri)];
+  }
+
   private getFields(iri: string): Field[] {
     const outgoing = this.store.getOutgoing(iri);
     const fields: Field[] = [];
@@ -789,29 +806,6 @@ export class RelationshipsWebview implements vscode.WebviewViewProvider, vscode.
   private getClassIri(entityIri: string): string | undefined {
     const rows = this.store.query(`SELECT ?t WHERE { <${entityIri}> a ?t . ?t a owl:Class . } LIMIT 1`);
     return rows[0]?.get('t')?.value;
-  }
-
-  private getMissingParams(iri: string, vr: ValidationResult) {
-    return [...vr.violations, ...vr.warnings].filter(i => i.kind === 'missing' && !i.isObject);
-  }
-
-  private getMissingOutgoing(iri: string, vr: ValidationResult) {
-    return [...vr.violations, ...vr.warnings].filter(i => (i.kind === 'missing' && i.isObject) || i.kind === 'or-group');
-  }
-
-  private getSchemaHints(iri: string, fields: Field[], outGroups: GroupedEdge[], vr: ValidationResult) {
-    const classIri = this.getClassIri(iri);
-    if (!classIri) { return []; }
-
-    const props = this.schema.getPropertiesForClass(classIri);
-    const existingPredicates = new Set<string>();
-    for (const f of fields) { /* fields use labels, need IRIs — skip for now */ }
-    for (const g of outGroups) { existingPredicates.add(g.relation); }
-    const issuePaths = new Set([...vr.violations, ...vr.warnings].map(i => i.path));
-
-    return props.filter(p =>
-      !existingPredicates.has(p.iri) && !issuePaths.has(p.iri) && p.domain !== undefined
-    );
   }
 
   // ==================== WRAP ====================
@@ -870,13 +864,14 @@ body { font-family:var(--vscode-font-family); font-size:13px; color:var(--fg); b
 .mono { font-family:var(--vscode-editor-font-family, 'SF Mono',Monaco,Menlo,Consolas,monospace); font-size:11px; }
 
 /* breadcrumb strip */
-.crumb-strip { display:flex; align-items:center; gap:8px; padding:8px 14px 6px; border-bottom:1px solid var(--border); }
+.crumb-strip { display:flex; align-items:center; gap:6px; padding:8px 14px 6px; border-bottom:1px solid var(--border); flex-wrap:wrap; row-gap:4px; }
 .crumb-kind { font-size:10px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--fg-muted); }
 .crumb-pill { display:inline-flex; align-items:center; gap:5px; padding:2px 9px 2px 7px; border-radius:11px; text-decoration:none; cursor:pointer; border:1px solid hsl(var(--h,212) 52% 80%); background:hsl(var(--h,212) 70% 96.5%); }
 .crumb-pill:hover { filter:brightness(.97); }
 .crumb-dot { width:6px; height:6px; border-radius:50%; flex:0 0 auto; background:hsl(var(--h,212) 58% 42%); }
 .crumb-name { font-size:12px; font-weight:600; color:hsl(var(--h,212) 55% 33%); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.crumb-parent { font-size:11px; color:var(--fg-muted); text-transform:uppercase; letter-spacing:.04em; }
+.crumb-pill-class { opacity:.75; }
+.crumb-pill-class:hover { opacity:1; }
 .crumb-edit { font-size:14px; color:var(--fg-muted); cursor:pointer; padding:2px; border-radius:4px; }
 .crumb-edit:hover { color:var(--fg); background:var(--list-hover); }
 .vscode-dark .crumb-pill { background:hsl(var(--h,212) 34% 15%); border-color:hsl(var(--h,212) 36% 38%); }
@@ -907,9 +902,12 @@ body { font-family:var(--vscode-font-family); font-size:13px; color:var(--fg); b
 .divider { display:flex; align-items:center; gap:6px; padding:5px 9px; background:var(--bg-section); }
 .in-div { border-top:1px solid var(--border); }
 .div-bar { width:7px; height:7px; border-radius:2px; flex:0 0 auto; }
-.param-bar { background:var(--accent-param); } .out-bar { background:var(--accent); } .in-bar { background:var(--accent-in); }
+.param-bar { background:var(--accent-param); } .out-bar { background:var(--accent); } .in-bar { background:var(--accent-in); } .remote-bar { background:var(--fg-muted); }
 .div-label { font-size:10px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; }
-.param-label { color:var(--accent-param); } .out-label { color:var(--accent); } .in-label { color:var(--accent-in); }
+.param-label { color:var(--accent-param); } .out-label { color:var(--accent); } .in-label { color:var(--accent-in); } .remote-label { color:var(--fg-muted); }
+.remote-section { opacity:.85; }
+.remote-section .val-actions { display:none !important; }
+.remote-ro { font-size:9px; color:var(--fg-muted); opacity:.6; display:inline-flex; align-items:center; gap:3px; margin-left:6px; }
 .div-hint { font-size:10px; color:var(--fg-muted); opacity:.7; }
 
 /* rows */
@@ -1221,9 +1219,13 @@ document.addEventListener('click', e => {
 });
 
 // form handling
-window.addEventListener('message', e => {
-  const msg = e.data;
+window.addEventListener('message', function(e) {
+  var msg = e.data;
   if (msg.type === 'showForm') renderForm(msg.form);
+  if (msg.type === 'remoteProps') {
+    var el = document.getElementById('remote-props');
+    if (el) el.innerHTML = msg.html;
+  }
 });
 
 function renderForm(form) {

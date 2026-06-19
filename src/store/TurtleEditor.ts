@@ -162,8 +162,11 @@ export class TurtleEditor {
   }
 
   private findBlockEnd(lines: string[], startLine: number): number {
+    let inTripleQuote = false;
     for (let i = startLine; i < lines.length; i++) {
-      if (lines[i].trimEnd().endsWith('.')) {
+      const tqCount = (lines[i].match(/"""/g) ?? []).length;
+      if (tqCount % 2 !== 0) { inTripleQuote = !inTripleQuote; }
+      if (!inTripleQuote && lines[i].trimEnd().endsWith('.')) {
         return i;
       }
     }
